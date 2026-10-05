@@ -50,6 +50,10 @@ def _paths(value: str) -> list[Path]:
     return [Path(p).expanduser().resolve() for p in value.split(":") if p.strip()]
 
 
+def _research_db_path() -> Path:
+    return Path(os.environ.get("ETSY_RESEARCH_DB") or "~/.indigorepublica-etsy-mcp/research.db").expanduser()
+
+
 @dataclass
 class Settings:
     keystring: str = ""
@@ -67,6 +71,7 @@ class Settings:
     public_hosts: list[str] = field(default_factory=list)
     oas_url: str = OAS_URL
     max_upload_mb: int = 25
+    research_db: Path = field(default_factory=lambda: _research_db_path())
 
     @property
     def api_key_header(self) -> str:
@@ -105,4 +110,5 @@ def load_settings() -> Settings:
         public_hosts=[h.strip() for h in (env("MCP_PUBLIC_HOSTS") or "").split(",") if h.strip()],
         oas_url=env("ETSY_OAS_URL") or OAS_URL,
         max_upload_mb=int(env("ETSY_MAX_UPLOAD_MB") or 25),
+        research_db=_research_db_path(),
     )

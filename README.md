@@ -2,7 +2,7 @@
 
 MCP server that gives Claude full control of **your own** Etsy shop: listings, digital-download files,
 images, orders, sales, fees, reviews. Runs over **stdio** for Claude Code and **Streamable HTTP** for
-Claude.ai (web, desktop, mobile) behind an HTTPS tunnel. 35 tools, 3 prompts, offline test suite.
+Claude.ai (web, desktop, mobile) behind an HTTPS tunnel. 41 tools, 3 prompts, offline test suite.
 
 > The term 'Etsy' is a trademark of Etsy, Inc. This application uses the Etsy API but is not endorsed or certified by Etsy, Inc.
 
@@ -17,7 +17,7 @@ cd ~/mcp-servers/indigorepublica-etsy-mcp
 uv sync --extra dev
 cp .env.example .env && chmod 600 .env     # fill ETSY_KEYSTRING + ETSY_SHARED_SECRET
 mkdir -p ~/etsy-products
-uv run pytest -q                           # 11 offline tests
+uv run pytest -q                           # offline tests
 
 # 2. Connect your shop (once; tokens auto-refresh afterwards)
 uv run indigorepublica-etsy-auth                     # or: --manual  |  --status
@@ -45,6 +45,7 @@ uv run indigorepublica-etsy-mcp --transport http     # or the systemd unit in de
 | Remote auth | required | HTTP mode refuses to start without `MCP_AUTH_TOKEN`; constant-time bearer check |
 | Host check | on | Only localhost + `MCP_PUBLIC_HOSTS` accepted (DNS-rebinding guard) |
 | Token file | `~/.indigorepublica-etsy-mcp/tokens.json` | chmod 600, atomic writes, file lock around refresh |
+| Write log | always on | Every write (incl. blocked/failed attempts) is appended to `research.db` → `etsy_write_log`; triggers forbid UPDATE/DELETE |
 | `etsy_api_request` | relative paths only | No absolute URLs, so your API key can't be sent to other hosts |
 
 ## Layout
@@ -57,6 +58,7 @@ src/indigorepublica_etsy_mcp/
   tokens.py   shared token store with refresh lock
   oas.py      search Etsy's OpenAPI spec (powers etsy_find_endpoint)
   config.py   .env loading
+  research.py SQLite research cache (ProfitTree data etc.) + append-only write log (`ETSY_RESEARCH_DB`)
 skills/etsy-shop-ops/SKILL.md   Claude Code skill: product folders, SEO rules, draft->publish
 examples/sample-product/        listing.json manifest convention
 deploy/indigorepublica-etsy-mcp.service   systemd --user unit for 24/7 remote mode
