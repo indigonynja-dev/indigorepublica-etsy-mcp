@@ -186,6 +186,7 @@ stop the server and delete `research.db`; that also deletes the write log, so co
 | Write log | always on | Every Etsy write, including blocked and failed attempts, is appended to `research.db` -> `etsy_write_log` (credentials and file bytes redacted); triggers forbid UPDATE/DELETE |
 | Resources | read-only | They read the cache, or make one cached Etsy read; they never write |
 | `etsy_api_request` | relative paths only | No absolute URLs, so your API key can't be sent to other hosts; a refused write is logged too |
+| Write retries | 429 and failed connects only | A write (POST/PUT/PATCH/DELETE) is re-sent only when Etsy rate-limited it (429) or the connection could not be made, so nothing was acted on. A 5xx, timeout or read error is attempted **once** and reported as `OUTCOME UNKNOWN: ... may or may not have been applied ... check the listing before retrying`; the attempt is logged like any other. Reads (GET) keep retrying with backoff |
 
 What each mode allows:
 
@@ -219,7 +220,7 @@ from the watchlist is one of them: it deletes a row in your own cache, not anyth
 ```
 src/indigorepublica_etsy_mcp/
   server.py   tools, prompts, stdio + HTTP entrypoint, bearer middleware
-  client.py   Etsy v3 client: keystring:secret header, refresh, throttle, retries, error hints
+  client.py   Etsy v3 client: keystring:secret header, refresh, throttle, retries (writes: 429 and failed connects only), error hints
   auth.py     PKCE login CLI (listener or --manual paste)
   tokens.py   shared token store with refresh lock
   oas.py      search Etsy's OpenAPI spec (powers etsy_find_endpoint)

@@ -12,11 +12,12 @@ import pytest
 from mcp import Client
 
 from indigorepublica_etsy_mcp import client as client_module
+from indigorepublica_etsy_mcp.client import EtsyClient, EtsyError
 from indigorepublica_etsy_mcp.server import build_server
 
-from .fakes import LISTINGS_PATH, SHOP_PATH, FullFake, ShopFake
+from .fakes import LISTINGS_PATH, SECTIONS_PATH, SHOP_PATH, FullFake, ShopFake
 from .test_resources import INTERNAL, read, read_error
-from .test_server import env  # noqa: F401  (env fixture)
+from .test_server import SHOP, env  # noqa: F401  (env fixture)
 
 RATE_LIMITED = {"error": "You have exceeded your rate limit."}
 NOW_FREE = {"retry-after": "0"}  # retried instantly: keeps these tests fast without touching the client's real retry policy
@@ -120,6 +121,185 @@ async def test_listings_resource_survives_one_429_and_reports_repeated_ones(env)
         fake.clear_faults()
         assert (await read(c, "etsy://shop/listings"))["cached"] is False, "a rate-limit error must not be cached"
     assert fake.count("GET", LISTINGS_PATH) == 6
+
+
+# ----------------------------------------------------------------------------- retries: reads vs. writes
+# Reads (GET) keep retrying 429, 5xx and network errors with backoff. Writes (POST/PUT/PATCH/DELETE) are re-sent only on a 429
+# (Etsy did not process it) or a failure to connect (nothing was sent). Anything that may have reached Etsy is attempted once and
+# reported as "outcome unknown", because a retry could create a second listing, image or file.
+SECTIONS = f"/shops/{SHOP}/sections"  # the path as the client takes it (SECTIONS_PATH is what the fake sees on the wire)
+SHOP_ENDPOINT = f"/shops/{SHOP}"
+UNKNOWN_PARTS = ("OUTCOME UNKNOWN", "may or may not have been applied", "not retried", "before retrying")
+
+
+def etsy_client(settings, fake) -> EtsyClient:
+    return EtsyClient(settings, transport=httpx.MockTransport(fake))
+
+
+def waits(sleeps: list[float]) -> list[float]:
+    return [d for d in sleeps if d >= 1]  # sub-second waits are the request throttle, not retry backoff
+
+
+@pytest.mark.parametrize("method, status", [("POST", 500), ("POST", 502), ("POST", 503), ("POST", 504), ("PUT", 500), ("PATCH", 500), ("DELETE", 500)])
+async def test_a_write_that_gets_a_5xx_is_attempted_exactly_once(env, sleeps, method, status):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault(method, SECTIONS_PATH, status, json={"error": "upstream exploded"})
+    with pytest.raises(EtsyError) as e:
+        await etsy_client(s, fake).request(method, SECTIONS, form={"title": "Budgets"})
+    assert fake.count(method, SECTIONS_PATH) == 1, "a 5xx can follow a change Etsy already made: never re-send a write"
+    assert waits(sleeps) == [], "and no backoff wait either"
+    assert e.value.status == status and e.value.outcome_unknown is True
+    for part in ("upstream exploded", *UNKNOWN_PARTS):
+        assert part in str(e.value), part
+
+
+async def test_a_post_that_gets_429_then_200_succeeds(env):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("POST", SECTIONS_PATH, 429, times=1, headers=NOW_FREE, json=RATE_LIMITED)
+    res = await etsy_client(s, fake).request("POST", SECTIONS, form={"title": "Budgets"})
+    assert (res["shop_section_id"], res["title"]) == (7, "Budgets"), "the retry carried the body again"
+    assert fake.count("POST", SECTIONS_PATH) == 2, "one 429 (not processed), then the attempt that went through"
+
+
+async def test_a_get_that_gets_500_then_200_succeeds(env, sleeps):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("GET", SHOP_PATH, 500, times=1)
+    res = await etsy_client(s, fake).request("GET", SHOP_ENDPOINT)
+    assert res["shop_name"] == "IndigoPrints"
+    assert fake.count("GET", SHOP_PATH) == 2
+    assert waits(sleeps) == [2], "reads keep the existing backoff"
+
+
+@pytest.mark.parametrize("status, error", [
+    pytest.param(500, None, id="500"), pytest.param(502, None, id="502"), pytest.param(503, None, id="503"),
+    pytest.param(504, None, id="504"), pytest.param(429, None, id="429"),
+    pytest.param(None, httpx.ReadTimeout, id="ReadTimeout"), pytest.param(None, httpx.ReadError, id="ReadError"),
+    pytest.param(None, httpx.RemoteProtocolError, id="RemoteProtocolError"), pytest.param(None, httpx.ConnectError, id="ConnectError"),
+    pytest.param(None, httpx.ConnectTimeout, id="ConnectTimeout"),
+])
+async def test_a_get_still_retries_everything_it_always_did(env, sleeps, status, error):
+    s, _, _ = env
+    fake = ShopFake()
+    if error is None:
+        fake.fault("GET", SHOP_PATH, status, times=1)
+    else:
+        fake.fault_raises("GET", SHOP_PATH, lambda: error("blip"), times=1)
+    assert (await etsy_client(s, fake).request("GET", SHOP_ENDPOINT))["shop_name"] == "IndigoPrints"
+    assert fake.count("GET", SHOP_PATH) == 2 and waits(sleeps) == [2]
+
+
+async def test_a_get_that_keeps_failing_gives_up_after_five_attempts_without_the_write_warning(env, sleeps):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("GET", SHOP_PATH, 503, json={"error": "unavailable"})
+    with pytest.raises(EtsyError) as e:
+        await etsy_client(s, fake).request("GET", SHOP_ENDPOINT)
+    assert fake.count("GET", SHOP_PATH) == 5 and waits(sleeps) == [2, 4, 8, 16]
+    assert e.value.status == 503 and e.value.outcome_unknown is False and "OUTCOME UNKNOWN" not in str(e.value)
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout])
+async def test_a_write_is_retried_when_the_connection_could_not_be_made(env, sleeps, error):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault_raises("POST", SECTIONS_PATH, lambda: error("no route to host"), times=2)
+    res = await etsy_client(s, fake).request("POST", SECTIONS, form={"title": "Budgets"})
+    assert res["title"] == "Budgets" and fake.count("POST", SECTIONS_PATH) == 3
+    assert waits(sleeps) == [2, 4]
+
+
+async def test_a_write_that_never_connects_gives_up_and_says_nothing_was_changed(env, sleeps):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault_raises("POST", SECTIONS_PATH, lambda: httpx.ConnectError("connection refused"))
+    with pytest.raises(EtsyError) as e:
+        await etsy_client(s, fake).request("POST", SECTIONS, form={"title": "Budgets"})
+    assert fake.count("POST", SECTIONS_PATH) == 5 and waits(sleeps) == [2, 4, 8, 16]
+    text = str(e.value)
+    assert e.value.outcome_unknown is False and "OUTCOME UNKNOWN" not in text, "nothing was sent, so there is no doubt"
+    assert "ConnectError: connection refused" in text and "never sent" in text and "nothing was changed" in text
+
+
+@pytest.mark.parametrize("method", ["POST", "PATCH", "DELETE"])
+@pytest.mark.parametrize("error", [httpx.ReadTimeout, httpx.ReadError, httpx.WriteTimeout, httpx.WriteError, httpx.RemoteProtocolError, httpx.ProxyError])
+async def test_a_write_is_never_retried_after_a_timeout_or_read_error(env, sleeps, method, error):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault_raises(method, SECTIONS_PATH, lambda: error("dropped"))
+    with pytest.raises(EtsyError) as e:
+        await etsy_client(s, fake).request(method, SECTIONS, form={"title": "Budgets"})
+    assert fake.count(method, SECTIONS_PATH) == 1 and waits(sleeps) == []
+    assert e.value.status == 0 and e.value.outcome_unknown is True
+    for part in (f"{error.__name__}: dropped", "after the request may have been sent", *UNKNOWN_PARTS):
+        assert part in str(e.value), part
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 409, 422])
+async def test_a_4xx_on_a_write_is_a_definite_answer_not_an_unknown_outcome(env, sleeps, status):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("POST", SECTIONS_PATH, status, json={"error": "rejected"})
+    with pytest.raises(EtsyError) as e:
+        await etsy_client(s, fake).request("POST", SECTIONS, form={"title": "Budgets"})
+    assert fake.count("POST", SECTIONS_PATH) == 1 and waits(sleeps) == []
+    assert e.value.status == status and e.value.outcome_unknown is False and "OUTCOME UNKNOWN" not in str(e.value)
+
+
+async def test_a_write_rejected_with_401_is_re_sent_once_after_a_token_refresh(env):
+    """The one other re-send: a 401 means Etsy refused the request before acting on it, so it is safe to send again with a fresh token."""
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("POST", SECTIONS_PATH, 401, times=1)
+    res = await etsy_client(s, fake).request("POST", SECTIONS, form={"title": "Budgets"})
+    assert res["shop_section_id"] == 7 and fake.count("POST", SECTIONS_PATH) == 2
+    assert fake.count("POST", "/v3/public/oauth/token") == 1, "the token was refreshed between the two attempts"
+
+
+async def test_a_5xx_on_a_write_is_attempted_once_logged_and_tells_the_model_to_check(env):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault("POST", SECTIONS_PATH, 500, json={"error": "upstream exploded"})
+    async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
+        r = await c.call_tool("etsy_create_shop_section", {"title": "Budgets"})
+        rows = await write_log(c)
+    assert r.is_error
+    for part in ("Etsy API 500", "upstream exploded", *UNKNOWN_PARTS):
+        assert part in r.content[0].text, part
+    assert fake.count("POST", SECTIONS_PATH) == 1
+    assert len(rows) == 1 and (rows[0]["tool"], rows[0]["mode"]) == ("etsy_create_shop_section", "safe")
+    assert rows[0]["result"].startswith("error: Etsy API 500") and "OUTCOME UNKNOWN" in rows[0]["result"]
+    assert rows[0]["after"]["request"] == {"title": "Budgets"} and rows[0]["after"]["response"] is None
+
+
+async def test_a_read_timeout_on_a_write_is_attempted_once_and_logged(env):
+    s, _, _ = env
+    fake = ShopFake()
+    fake.fault_raises("PATCH", f"{LISTINGS_PATH}/901", lambda: httpx.ReadTimeout("slow"))
+    async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
+        r = await c.call_tool("etsy_update_listing", {"listing_id": 901, "fields": {"title": "Budget Planner Spreadsheet Template for Google Sheets"}})
+        rows = await write_log(c)
+    assert r.is_error and "ReadTimeout: slow" in r.content[0].text and "OUTCOME UNKNOWN" in r.content[0].text
+    assert fake.count("PATCH", f"{LISTINGS_PATH}/901") == 1
+    assert len(rows) == 1 and rows[0]["tool"] == "etsy_update_listing" and rows[0]["listing_id"] == 901
+    assert rows[0]["result"].startswith("error:") and "OUTCOME UNKNOWN" in rows[0]["result"]
+
+
+async def test_an_upload_with_an_unknown_outcome_is_not_retried_and_blocks_publishing(env):
+    s, _, products = env
+    fake = ShopFake()
+    images = f"{LISTINGS_PATH}/901/images"
+    fake.fault("POST", images, 500)
+    async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
+        r = await c.call_tool("etsy_create_digital_listing", {"manifest_path": str(products / "listing.json"), "publish": True, "confirm_publish_fee": True})
+    assert not r.is_error, r.content  # partial failures are reported, not hidden
+    report = r.structured_content
+    assert report["images"] == [] and any("OUTCOME UNKNOWN" in x for x in report["errors"])
+    assert report["state"] == "draft" and report["publish"].startswith("skipped")
+    assert fake.count("POST", images) == 1, "the upload is not re-sent, so no duplicate image"
+    assert fake.count("PATCH", f"{LISTINGS_PATH}/901") == 0, "and nothing was published"
 
 
 # ----------------------------------------------------------------------------- write tools vs. server mode

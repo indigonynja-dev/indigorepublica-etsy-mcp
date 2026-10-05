@@ -61,6 +61,7 @@ Rules of the road:
 - Money comes back as decimals in the shop currency. Timestamps are ISO-8601 UTC.
 - Prefer the specific tools; use etsy_find_endpoint + etsy_api_request only for gaps.
 - Every write to Etsy is recorded in a local append-only log (etsy_write_log).
+- A write error that says OUTCOME UNKNOWN may have been applied and was not retried: read it back (etsy_get_listing) and compare before trying again. Never repeat a create blindly.
 - Market data comes from other tools (e.g. ProfitTree); cache it with research_save_* and reuse it via research_get_* before re-fetching.
 - Read-only resources (etsy://shop/listings, etsy://keywords/{seed}, etsy://competitor/{shop}, etsy://audit/{listing_id}, etsy://writes/recent) expose the cache and the write log; they never write.
 - File uploads read from the server's allowed folders (ETSY_UPLOAD_DIRS) or from https URLs.

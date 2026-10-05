@@ -8,7 +8,8 @@ FullFake      everything the server can call: ShopFake for bearer-token requests
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -18,6 +19,7 @@ from .test_server import SHOP
 
 SHOP_PATH = f"/v3/application/shops/{SHOP}"
 LISTINGS_PATH = f"{SHOP_PATH}/listings"
+SECTIONS_PATH = f"{SHOP_PATH}/sections"
 
 
 def listing_row(i: int, ts: int = 1_760_000_000, state: str = "active") -> dict[str, Any]:
@@ -47,6 +49,10 @@ class ShopFake(SeoFake):
         self._faults.append({"method": method, "path": path, "left": times, "status": status, "headers": headers or {},
                              "json": {"error": f"injected {status}"} if json is None else json})
 
+    def fault_raises(self, method: str, path: str, make_error: Callable[[], Exception], *, times: int | None = None) -> None:
+        """Make `method path` raise a transport error (ConnectError, ReadTimeout...) the next `times` requests (forever when None)."""
+        self._faults.append({"method": method, "path": path, "left": times, "raises": make_error})
+
     def clear_faults(self) -> None:
         self._faults.clear()
 
@@ -57,9 +63,13 @@ class ShopFake(SeoFake):
             if (f["method"], f["path"]) == (m, p) and (f["left"] is None or f["left"] > 0):
                 if f["left"] is not None:
                     f["left"] -= 1
+                if "raises" in f:
+                    raise f["raises"]()
                 return httpx.Response(f["status"], headers=f["headers"], json=f["json"])
         if m == "DELETE" and (p.startswith("/v3/application/listings/") or p.startswith(f"{LISTINGS_PATH}/")):
             return httpx.Response(204)
+        if m == "POST" and p == SECTIONS_PATH:
+            return httpx.Response(201, json={"shop_section_id": 7, "title": parse_qs(req.read().decode()).get("title", [""])[0], "active_listing_count": 0})
         if m == "GET" and p == LISTINGS_PATH:
             assert req.headers["x-api-key"] == "KEY:SECRET" and req.headers["authorization"].startswith("Bearer 77.")
             q = dict(req.url.params)

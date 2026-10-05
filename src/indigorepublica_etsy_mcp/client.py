@@ -11,7 +11,16 @@ import httpx
 from .config import API_BASE, TOKEN_URL, Settings
 from .tokens import TokenStore
 
-RETRY_STATUSES = {429, 500, 502, 503, 504}
+RETRY_STATUSES = {429, 500, 502, 503, 504}  # reads (GET): rate limits and server errors are retried with backoff
+# Writes (POST/PUT/PATCH/DELETE) are re-sent only when Etsy certainly did not act on them: a 429 (rate limited, not processed)
+# or a connection that could not be made. A 5xx, a timeout or a read error can arrive AFTER Etsy applied the change, so those
+# are reported once as "outcome unknown" rather than risking a duplicate listing, image or file.
+WRITE_RETRY_STATUSES = {429}
+NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)  # all raised before any request byte is written
+OUTCOME_UNKNOWN = (
+    "OUTCOME UNKNOWN: this write may or may not have been applied, and it was not retried automatically. "
+    "Check the listing (etsy_get_listing) or the Etsy UI before retrying, so it is not applied twice."
+)
 
 HINTS = {
     "shared secret": "Set ETSY_SHARED_SECRET in .env (Etsy needs 'keystring:shared_secret' in x-api-key since Feb 2026).",
@@ -22,8 +31,9 @@ HINTS = {
 
 
 class EtsyError(Exception):
-    def __init__(self, status: int, message: str, path: str = "", body: Any = None):
+    def __init__(self, status: int, message: str, path: str = "", body: Any = None, outcome_unknown: bool = False):
         self.status, self.message, self.path, self.body = status, message, path, body
+        self.outcome_unknown = outcome_unknown  # a write that failed in a way that may still have been applied
         hint = next((h for k, h in HINTS.items() if k in message.lower()), "")
         if not hint and status == 401:
             hint = "Token rejected. Run `uv run indigorepublica-etsy-auth --status`; if it persists, re-run `uv run indigorepublica-etsy-auth`."
@@ -34,7 +44,12 @@ class EtsyError(Exception):
         if not hint and status == 429:
             hint = "Rate limited by Etsy. Lower ETSY_MAX_QPS or wait; daily quotas reset on a rolling window."
         self.hint = hint
-        super().__init__(f"Etsy API {status} on {path}: {message}" + (f" | Hint: {hint}" if hint else ""))
+        super().__init__(f"Etsy API {status} on {path}: {message}" + (f" | Hint: {hint}" if hint else "")
+                         + (f" | {OUTCOME_UNKNOWN}" if outcome_unknown else ""))
+
+
+def _describe(e: Exception) -> str:
+    return type(e).__name__ + (f": {e}" if str(e) else "")
 
 
 class RateLimiter:
@@ -143,8 +158,12 @@ class EtsyClient:
         auth: bool = True,
         max_retries: int = 4,
     ) -> Any:
+        """One Etsy call. Reads (GET) retry on 429, 5xx and any network error, with backoff. Writes retry only on a 429 or a
+        failure to connect (nothing was sent); a 5xx, timeout or read error is raised once as an outcome-unknown error."""
         self.s.require_credentials()
         url = path if path.startswith("http") else f"{API_BASE}{path if path.startswith('/') else '/' + path}"
+        is_read = method.upper() == "GET"
+        retry_statuses = RETRY_STATUSES if is_read else WRITE_RETRY_STATUSES
         attempt = 0
         while True:
             headers = {"x-api-key": self.s.api_key_header, "Accept": "application/json"}
@@ -163,13 +182,19 @@ class EtsyClient:
             try:
                 resp = await self.http.request(method.upper(), url, **kwargs)
             except httpx.TransportError as e:
+                if not is_read and not isinstance(e, NOT_SENT_ERRORS):
+                    # Timeout, read/write error, dropped connection: the request may already have reached Etsy. Never re-send a write.
+                    raise EtsyError(0, f"connection lost or timed out after the request may have been sent ({_describe(e)})", path,
+                                    outcome_unknown=True) from e
                 if attempt >= max_retries:
-                    raise EtsyError(0, f"network error: {e}", path) from e
+                    if is_read:
+                        raise EtsyError(0, f"network error: {e}", path) from e
+                    raise EtsyError(0, f"could not connect to Etsy ({_describe(e)}); the request was never sent, so nothing was changed", path) from e
                 attempt += 1
                 await asyncio.sleep(min(2**attempt, 20))
                 continue
 
-            if resp.status_code in RETRY_STATUSES and attempt < max_retries:
+            if resp.status_code in retry_statuses and attempt < max_retries:
                 attempt += 1
                 retry_after = resp.headers.get("retry-after")
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else min(2**attempt, 30)
@@ -188,7 +213,7 @@ class EtsyClient:
                     msg = body.get("error") or body.get("error_description") or str(body)
                 except ValueError:
                     body, msg = resp.text, resp.text[:500]
-                raise EtsyError(resp.status_code, msg, path, body)
+                raise EtsyError(resp.status_code, msg, path, body, outcome_unknown=not is_read and resp.status_code >= 500)
             if resp.status_code == 204 or not resp.content:
                 return {"ok": True, "status": resp.status_code}
             try:
