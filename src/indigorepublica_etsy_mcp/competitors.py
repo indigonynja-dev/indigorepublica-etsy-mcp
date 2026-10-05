@@ -200,10 +200,13 @@ class Competitors:
         return {"count": len(shops), "shops": shops}
 
     # ------------------------------------------------------------- snapshots
-    def _snapshots(self, shop_id: int) -> list[dict[str, Any]]:
+    def _snapshots(self, shop_id: int, limit: int | None = None) -> list[dict[str, Any]]:
+        """Stored snapshots, newest first. Each one carries every listing, so pass `limit` when only the latest are needed."""
+        sql, args = "SELECT rowid AS rid, * FROM competitor_snapshots WHERE shop_id=? ORDER BY taken_at DESC, rowid DESC", [shop_id]
+        if limit:
+            sql, args = sql + " LIMIT ?", [*args, limit]
         with closing(self.db._connect()) as con:
-            rows = con.execute("SELECT rowid AS rid, * FROM competitor_snapshots WHERE shop_id=? ORDER BY taken_at DESC, rowid DESC",
-                               (shop_id,)).fetchall()
+            rows = con.execute(sql, args).fetchall()
         out = []
         for r in rows:
             d = _loads(r["data_json"]) or {}
@@ -259,7 +262,7 @@ class Competitors:
 
     def profile(self, shop: str | int) -> dict[str, Any]:
         e = self.resolve(shop)
-        snaps = self._snapshots(e["shop_id"])
+        snaps = self._snapshots(e["shop_id"], limit=1)  # only the latest is profiled; don't parse months of older ones
         if not snaps:
             raise CompetitorError(f"No snapshots for {e['shop_name'] or e['shop_id']} yet. Run competitor_snapshot first.")
         snap = snaps[0]
