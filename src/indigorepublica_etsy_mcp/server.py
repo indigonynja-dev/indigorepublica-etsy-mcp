@@ -27,6 +27,7 @@ from mcp.types import ToolAnnotations
 
 from . import __version__
 from .client import EtsyClient, EtsyError
+from .competitors import register_competitor_tools
 from .config import Settings, load_settings
 from .oas import SpecIndex
 from .research import ResearchDB
@@ -943,6 +944,8 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     async def etsy_write_log(limit: int = 50, listing_id: int | None = None) -> dict[str, Any]:
         """Read the append-only log of writes this server made (newest first): tool, listing_id, server mode, dry_run, before/after, result. Filter by listing_id. Nothing can delete rows."""
         return {"entries": research.read_write_log(limit, listing_id)}
+
+    register_competitor_tools(mcp, etsy, research)
 
     # ======================================================================= PROMPTS
     @mcp.prompt()
