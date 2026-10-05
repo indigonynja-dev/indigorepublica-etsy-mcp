@@ -31,6 +31,7 @@ from .competitors import register_competitor_tools
 from .config import Settings, load_settings
 from .oas import SpecIndex
 from .research import ResearchDB
+from . import seo
 
 log = logging.getLogger("indigorepublica_etsy_mcp")
 
@@ -903,6 +904,9 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
                 path = path.replace("{shop_id}", await sid())
             w.response = await call(method, path, params=query, form=form, json=json_body)
             return w.response
+
+    seo.register(mcp, research=research, call=call, sid=sid, guard=guard, update_listing=update_listing,
+                 taxonomy_flat=taxonomy_flat, lint=seo_check, write=WRITE)
 
     # ======================================================================= RESEARCH CACHE & WRITE LOG
     def _rows(rows: Any) -> list[dict[str, Any]]:

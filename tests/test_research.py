@@ -32,7 +32,7 @@ def test_schema_creation_and_idempotent_migration(db):
         cols = [r[1] for r in con.execute("PRAGMA table_info(keywords)")]
     assert {"keywords", "market_listings", "competitor_snapshots", "audits", "write_log"} <= tables
     assert cols == ["keyword", "source", "searches", "clicks", "competition", "digital_share", "trend", "niche_score", "raw_json", "fetched_at"]
-    assert db.schema_version() == SCHEMA_VERSION == 2
+    assert db.schema_version() == SCHEMA_VERSION
     db.save_keywords([{"keyword": "x"}], "profittree")
     again = ResearchDB(db.path)  # re-open: migration is a no-op, data kept
     assert again.get_keywords(None, 7)["count"] == 1
@@ -103,7 +103,7 @@ def test_stats(db):
     assert db.stats()["tables"]["keywords"] == {"rows": 0, "oldest": None, "newest": None, "newest_age_days": None}
     db.save_keywords([{"keyword": "a"}], "profittree")
     st = db.stats()
-    assert st["tables"]["keywords"]["rows"] == 1 and st["tables"]["keywords"]["oldest"] and st["schema_version"] == 2
+    assert st["tables"]["keywords"]["rows"] == 1 and st["tables"]["keywords"]["oldest"] and st["schema_version"] == SCHEMA_VERSION
 
 
 def test_write_log_is_append_only(db):

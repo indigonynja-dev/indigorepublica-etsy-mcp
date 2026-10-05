@@ -57,7 +57,15 @@ CREATE TABLE competitors (
     shop_id INTEGER PRIMARY KEY, shop_name TEXT NOT NULL, added_at TEXT NOT NULL
 );
 """
-MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [_V1, _V2]
+# v3: stored SEO update previews (seo_preview_update -> seo_apply_update)
+_V3 = """
+CREATE TABLE seo_previews (
+    preview_id TEXT PRIMARY KEY, listing_id INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+    before_json TEXT NOT NULL, proposal_json TEXT NOT NULL, applied_at TEXT
+);
+CREATE INDEX idx_seo_previews_listing ON seo_previews(listing_id, created_at);
+"""
+MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [_V1, _V2, _V3]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 # table -> timestamp column used for oldest/newest in cache stats

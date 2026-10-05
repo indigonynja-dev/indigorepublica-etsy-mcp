@@ -2,7 +2,7 @@
 
 MCP server that gives Claude full control of **your own** Etsy shop: listings, digital-download files,
 images, orders, sales, fees, reviews. Runs over **stdio** for Claude Code and **Streamable HTTP** for
-Claude.ai (web, desktop, mobile) behind an HTTPS tunnel. 41 tools, 3 prompts, offline test suite.
+Claude.ai (web, desktop, mobile) behind an HTTPS tunnel. 52 tools, 3 prompts, offline test suite.
 
 > The term 'Etsy' is a trademark of Etsy, Inc. This application uses the Etsy API but is not endorsed or certified by Etsy, Inc.
 
@@ -59,6 +59,7 @@ src/indigorepublica_etsy_mcp/
   oas.py      search Etsy's OpenAPI spec (powers etsy_find_endpoint)
   config.py   .env loading
   competitors.py competitor watchlist/snapshots/diff/profile tools + `indigorepublica-etsy-snapshot` CLI
+  seo.py      SEO audit, tag gaps, preview->apply updates
   research.py SQLite research cache (ProfitTree data etc.) + append-only write log (`ETSY_RESEARCH_DB`)
 skills/etsy-shop-ops/SKILL.md   Claude Code skill: product folders, SEO rules, draft->publish
 examples/sample-product/        listing.json manifest convention
