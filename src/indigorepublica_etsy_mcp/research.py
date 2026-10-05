@@ -50,7 +50,14 @@ BEGIN SELECT RAISE(ABORT, 'write_log is append-only'); END;
 CREATE TRIGGER write_log_no_delete BEFORE DELETE ON write_log
 BEGIN SELECT RAISE(ABORT, 'write_log is append-only'); END;
 """
-MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [_V1]
+# v2: competitor tracking (watchlist) + ProfitTree's shop_name on market rows.
+_V2 = """
+ALTER TABLE market_listings ADD COLUMN shop_name TEXT;
+CREATE TABLE competitors (
+    shop_id INTEGER PRIMARY KEY, shop_name TEXT NOT NULL, added_at TEXT NOT NULL
+);
+"""
+MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [_V1, _V2]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 # table -> timestamp column used for oldest/newest in cache stats
@@ -74,6 +81,7 @@ LISTING_ALIASES = {
     "est_monthly_sales": ("monthly_sales", "est_monthly_sales_count", "est_sales"),
     "est_monthly_revenue": ("monthly_revenue", "est_revenue"),
     "views": ("total_views",),
+    "shop_name": ("shop",),
 }
 
 
@@ -259,11 +267,13 @@ class ResearchDB:
                     tags = _loads(row["tags_json"]) if isinstance(row["tags_json"], str) else row["tags_json"]
                 if isinstance(tags, str):
                     tags = [t.strip() for t in tags.split(",") if t.strip()]
+                shop_name = str(g("shop_name") or "").strip() or None
                 con.execute(
-                    "INSERT OR REPLACE INTO market_listings VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO market_listings (listing_id, keyword, shop_id, title, price, tags_json, views, favorites, "
+                    "est_monthly_sales, est_monthly_revenue, source, fetched_at, shop_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (lid, kw, _int(row.get("shop_id")), row.get("title"), _num(row.get("price")), _dumps(tags),
                      _int(g("views")), _int(g("favorites")), _num(g("est_monthly_sales")), _num(g("est_monthly_revenue")),
-                     source, ts),
+                     source, ts, shop_name),
                 )
                 saved += 1
         return {"saved": saved, "skipped": skipped, "keyword": kw, "source": source, "fetched_at": ts}

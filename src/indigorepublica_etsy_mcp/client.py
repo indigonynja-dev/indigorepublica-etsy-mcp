@@ -196,14 +196,14 @@ class EtsyClient:
             except ValueError:
                 return {"ok": True, "status": resp.status_code, "text": resp.text[:2000]}
 
-    async def paginate(self, path: str, params: dict[str, Any], limit: int, offset: int = 0, max_page: int = 100) -> dict[str, Any]:
+    async def paginate(self, path: str, params: dict[str, Any], limit: int, offset: int = 0, max_page: int = 100, auth: bool = True) -> dict[str, Any]:
         """Fetch up to `limit` results across pages. Returns {count, results, next_offset}."""
         results: list[Any] = []
         count = None
         cur = offset
         while len(results) < limit:
             page = min(max_page, limit - len(results))
-            data = await self.request("GET", path, params={**params, "limit": page, "offset": cur})
+            data = await self.request("GET", path, params={**params, "limit": page, "offset": cur}, auth=auth)
             batch = data.get("results", [])
             count = data.get("count", count)
             results.extend(batch)

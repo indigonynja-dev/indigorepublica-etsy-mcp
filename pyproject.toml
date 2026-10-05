@@ -18,6 +18,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 [project.scripts]
 indigorepublica-etsy-mcp = "indigorepublica_etsy_mcp.server:main"
 indigorepublica-etsy-auth = "indigorepublica_etsy_mcp.auth:main"
+indigorepublica-etsy-snapshot = "indigorepublica_etsy_mcp.competitors:main"
 
 [build-system]
 requires = ["hatchling"]

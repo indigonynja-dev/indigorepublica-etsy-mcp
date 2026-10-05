@@ -58,6 +58,7 @@ src/indigorepublica_etsy_mcp/
   tokens.py   shared token store with refresh lock
   oas.py      search Etsy's OpenAPI spec (powers etsy_find_endpoint)
   config.py   .env loading
+  competitors.py competitor watchlist/snapshots/diff/profile tools + `indigorepublica-etsy-snapshot` CLI
   research.py SQLite research cache (ProfitTree data etc.) + append-only write log (`ETSY_RESEARCH_DB`)
 skills/etsy-shop-ops/SKILL.md   Claude Code skill: product folders, SEO rules, draft->publish
 examples/sample-product/        listing.json manifest convention
