@@ -1,6 +1,6 @@
 ---
 name: etsy-shop-ops
-description: Use when building, listing, publishing, auditing, or reporting on products in Dom's Etsy shop through the nynja-etsy MCP tools (etsy_*). Covers the digital-download product folder convention, listing SEO rules, the draft -> review -> publish workflow, and order/finance reporting. Trigger on "list this on Etsy", "make an Etsy listing", "publish to my shop", "Etsy sales", "fix my listings", "shop report".
+description: Use when building, listing, publishing, auditing, or reporting on products in Dom's Etsy shop through the indigorepublica-etsy MCP tools (etsy_*). Covers the digital-download product folder convention, listing SEO rules, the draft -> review -> publish workflow, and order/finance reporting. Trigger on "list this on Etsy", "make an Etsy listing", "publish to my shop", "Etsy sales", "fix my listings", "shop report".
 ---
 
 # Etsy shop operations
@@ -66,7 +66,7 @@ Paths are relative to the manifest's folder. Find `taxonomy_id` with `etsy_searc
 ## When a tool fails
 
 - `403 ... not active`: Etsy app still pending approval. Nothing to fix locally.
-- `401` / `invalid_grant`: run `uv run nynja-etsy-auth` in the server folder.
+- `401` / `invalid_grant`: run `uv run indigorepublica-etsy-auth` in the server folder.
 - `outside ETSY_UPLOAD_DIRS`: move the file under `~/etsy-products/` or add the folder to `ETSY_UPLOAD_DIRS`.
 - Blocked by mode: tell the user which `ETSY_MCP_MODE` would allow it; don't work around it with `etsy_api_request`.
 - Need an endpoint with no dedicated tool: `etsy_find_endpoint` -> `etsy_api_request`.

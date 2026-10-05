@@ -1,0 +1,16 @@
+# systemd --user unit for remote (Claude.ai) mode.
+# Install:  mkdir -p ~/.config/systemd/user && cp deploy/indigorepublica-etsy-mcp.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now indigorepublica-etsy-mcp
+#           loginctl enable-linger $USER   # keep it running when you're logged out
+[Unit]
+Description=IndigoRepublica Etsy MCP (HTTP mode for Claude.ai)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/mcp-servers/indigorepublica-etsy-mcp
+ExecStart=%h/.local/bin/uv run indigorepublica-etsy-mcp --transport http
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -36,7 +36,7 @@ class TokenStore:
         """Return tokens, reloading if another process rewrote the file."""
         if not self.path.exists():
             raise FileNotFoundError(
-                f"No Etsy tokens at {self.path}. Run `uv run nynja-etsy-auth` once to connect your shop."
+                f"No Etsy tokens at {self.path}. Run `uv run indigorepublica-etsy-auth` once to connect your shop."
             )
         mtime = self.path.stat().st_mtime
         if self._cache is None or mtime != self._mtime:

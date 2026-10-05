@@ -13,8 +13,8 @@ import httpx
 import pytest
 from mcp import Client
 
-from nynja_etsy_mcp.config import Settings
-from nynja_etsy_mcp.server import build_http_app, build_server, seo_check
+from indigorepublica_etsy_mcp.config import Settings
+from indigorepublica_etsy_mcp.server import build_http_app, build_server, seo_check
 
 SHOP = 4242
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
@@ -39,7 +39,7 @@ class FakeEtsy:
         if p == "/v3/application/users/me":
             return httpx.Response(200, json={"user_id": 77, "shop_id": SHOP})
         if p == f"/v3/application/shops/{SHOP}" and m == "GET":
-            return httpx.Response(200, json={"shop_id": SHOP, "shop_name": "NynjaPrints", "currency_code": "USD", "listing_active_count": 3})
+            return httpx.Response(200, json={"shop_id": SHOP, "shop_name": "IndigoPrints", "currency_code": "USD", "listing_active_count": 3})
         if p == f"/v3/application/shops/{SHOP}/listings" and m == "POST":
             self.next_listing += 1
             f = parse_qs(body.decode())
@@ -120,7 +120,7 @@ async def test_whoami_and_shop_id_cached(env):
     server = build_server(s, transport=httpx.MockTransport(fake))
     r = await call(server, "etsy_whoami")
     assert not r.is_error, r
-    assert r.structured_content["shop_name"] == "NynjaPrints"
+    assert r.structured_content["shop_name"] == "IndigoPrints"
 
 
 async def test_digital_listing_from_manifest(env):
@@ -174,7 +174,7 @@ async def test_api_request_ssrf_guard(env):
     r = await call(server, "etsy_api_request", {"method": "GET", "path": "https://evil.example/x"})
     assert r.is_error
     r = await call(server, "etsy_api_request", {"method": "GET", "path": "/shops/{shop_id}"})
-    assert not r.is_error and json.loads(r.content[0].text)["shop_name"] == "NynjaPrints"
+    assert not r.is_error and json.loads(r.content[0].text)["shop_name"] == "IndigoPrints"
 
 
 async def test_token_refresh_rotates_and_persists(env):
@@ -243,7 +243,7 @@ def test_http_bearer_and_host_checks(env):
         assert httpx.post(f"{base}/mcp", json=init, headers={**hdr, "Authorization": "Bearer wrong"}).status_code == 401
         ok = httpx.post(f"{base}/mcp", json=init, headers={**hdr, "Authorization": "Bearer t0ken"})
         assert ok.status_code == 200, ok.text
-        assert "nynja-etsy" in ok.text
+        assert "indigorepublica-etsy" in ok.text
         # Tunnel host allowed, random host rejected (DNS-rebinding guard)
         tunneled = httpx.post(f"{base}/mcp", json=init, headers={**hdr, "Authorization": "Bearer t0ken", "Host": "box.example.ts.net"})
         assert tunneled.status_code == 200, tunneled.text
@@ -252,3 +252,14 @@ def test_http_bearer_and_host_checks(env):
     finally:
         server.should_exit = True
         th.join(timeout=5)
+
+
+def test_migrate_legacy_data_dir(tmp_path):
+    from indigorepublica_etsy_mcp.config import migrate_legacy_data_dir
+
+    old = tmp_path / (".nynja" + "-etsy-mcp")
+    old.mkdir()
+    (old / "tokens.json").write_text("{}")
+    assert migrate_legacy_data_dir(tmp_path) is True
+    assert (tmp_path / ".indigorepublica-etsy-mcp" / "tokens.json").exists() and not old.exists()
+    assert migrate_legacy_data_dir(tmp_path) is False

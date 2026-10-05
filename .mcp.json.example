@@ -2,7 +2,7 @@
   "mcpServers": {
     "etsy": {
       "command": "uv",
-      "args": ["run", "--directory", "${HOME}/mcp-servers/nynja-etsy-mcp", "nynja-etsy-mcp"]
+      "args": ["run", "--directory", "${HOME}/mcp-servers/indigorepublica-etsy-mcp", "indigorepublica-etsy-mcp"]
     }
   }
 }
