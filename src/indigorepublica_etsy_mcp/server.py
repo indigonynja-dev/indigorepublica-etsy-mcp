@@ -974,7 +974,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         """Read the append-only log of writes this server made (newest first): tool, listing_id, server mode, dry_run, before/after, result. Filter by listing_id. Nothing can delete rows."""
         return {"entries": research.read_write_log(limit, listing_id)}
 
-    competitors = register_competitor_tools(mcp, etsy, research, settings.mode)
+    competitors = register_competitor_tools(mcp, etsy, research)
 
     # ======================================================================= RESOURCES (read-only)
     resources.register(mcp, research=research, competitors=competitors, etsy=etsy, sid=sid, summarize=listing_summary,

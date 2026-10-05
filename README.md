@@ -107,7 +107,7 @@ Other shops are read through Etsy's public API endpoints with your API key. Noth
 | `competitor_snapshot` | Fetch all active listings of a watched shop (title, tags, price, image count, dates) and store a snapshot. |
 | `competitor_snapshot_all` | Snapshot every watched shop; one failing shop does not stop the rest. |
 | `competitor_diff` | What changed between snapshots: new/removed listings, title, tag, price and image-count changes. Shows the date and age of both snapshots. |
-| `competitor_profile` | From the latest snapshot: price median/quartiles, top 30 tags, 10 newest listings, average listing age. Refreshes the snapshot first if it is older than 6 hours (not in `readonly` mode); if the refresh fails the old data comes back labelled with its age. |
+| `competitor_profile` | From the latest snapshot: price median/quartiles, top 30 tags, 10 newest listings, average listing age. Refreshes the snapshot first if it is older than 6 hours (allowed in every mode, like `competitor_snapshot`); if the refresh fails the old data comes back labelled with its age. |
 
 ### SEO audit and safe edits
 
@@ -182,8 +182,8 @@ public or multi-seller service. The data it keeps is limited accordingly.
 - **Retention.** Etsy-sourced cache data (`competitor_snapshots`, `market_listings`) and ProfitTree keyword rows older than
   `ETSY_CACHE_RETENTION_DAYS` (default 90) are deleted automatically on every server start and at the end of every snapshot CLI run.
   `research_prune(dry_run=true)` previews what would go; `dry_run=false` runs it now.
-- **Freshness.** `competitor_profile` re-snapshots a competitor first when the latest snapshot is older than 6 hours (skipped in
-  `readonly` mode, throttled and 429-backed-off like every Etsy call). If the refresh fails, the old data is returned clearly labelled
+- **Freshness.** `competitor_profile` re-snapshots a competitor first when the latest snapshot is older than 6 hours (allowed in every mode, like `competitor_snapshot`: it only reads public
+  Etsy data and writes the local cache; throttled and 429-backed-off like every Etsy call). If the refresh fails, the old data is returned clearly labelled
   with its age. `competitor_diff` shows the dates of both snapshots, and `etsy://competitor/{shop}` leads with the snapshot age.
 - **Buyer data.** Before anything is stored in the write log, buyer personal data is replaced with `[BUYER_DATA_REMOVED]` in both
   requests and responses: names, address lines, city/state/zip/country, emails, phone numbers, buyer user ids, gift messages and

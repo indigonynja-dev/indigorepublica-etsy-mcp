@@ -132,8 +132,8 @@ def diff_snapshots(old: list[dict[str, Any]], new: list[dict[str, Any]], max_det
 class Competitors:
     """Watchlist + snapshot store on top of the research DB, fetching through the existing EtsyClient."""
 
-    def __init__(self, etsy: EtsyClient, db: ResearchDB, mode: str = "safe"):
-        self.etsy, self.db, self.mode = etsy, db, mode
+    def __init__(self, etsy: EtsyClient, db: ResearchDB):
+        self.etsy, self.db = etsy, db
         self._refresh_failed_at: dict[int, float] = {}
 
     # ------------------------------------------------------------- Etsy (public endpoints, API key only)
@@ -296,16 +296,14 @@ class Competitors:
 
     async def profile_fresh(self, shop: str | int) -> dict[str, Any]:
         """Profile of the latest snapshot, re-snapshotting first when it is older than REFRESH_AFTER_HOURS. A refresh that is
-        skipped (readonly mode, recent failure) or fails returns the old data, clearly labelled with its age."""
+        skipped (recent failure) or fails returns the old data, clearly labelled with its age."""
         e = self.resolve(shop)
         snaps = self._snapshots(e["shop_id"], limit=1)
         if not snaps:
             raise CompetitorError(f"No snapshots for {e['shop_name'] or e['shop_id']} yet. Run competitor_snapshot first.")
         refresh: dict[str, Any] = {"attempted": False, "refreshed": False}
         if _freshness_fields(snaps[0]["taken_at"])["stale"]:
-            if self.mode == "readonly":
-                refresh["note"] = "Not refreshed: server is in readonly mode (ETSY_MCP_MODE=readonly), so no new snapshot is stored."
-            elif time.monotonic() - self._refresh_failed_at.get(e["shop_id"], -1e9) < REFRESH_RETRY_SECONDS:
+            if time.monotonic() - self._refresh_failed_at.get(e["shop_id"], -1e9) < REFRESH_RETRY_SECONDS:
                 refresh["note"] = "Not refreshed: a refresh failed a moment ago; not retrying yet."
             else:
                 refresh["attempted"] = True
@@ -349,8 +347,8 @@ def _parse_since(value: str) -> datetime:
 
 
 # ----------------------------------------------------------------------------- MCP registration
-def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: ResearchDB, mode: str = "safe") -> Competitors:
-    comp = Competitors(etsy, research, mode)
+def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: ResearchDB) -> Competitors:
+    comp = Competitors(etsy, research)
 
     def wrap(fn):
         async def run(*a, **kw):
@@ -393,7 +391,7 @@ def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: Resear
 
     @mcp.tool(annotations=FETCH)
     async def competitor_profile(shop: str) -> dict[str, Any]:
-        """Profile from a shop's latest snapshot: listing count, price median/p25/p75, top 30 tags with counts, 10 newest listings, average listing age in days. If that snapshot is older than 6 hours it is refreshed first from Etsy's public API (skipped in readonly mode); if the refresh fails the old data is returned, labelled with its age (snapshot_age, refresh)."""
+        """Profile from a shop's latest snapshot: listing count, price median/p25/p75, top 30 tags with counts, 10 newest listings, average listing age in days. If that snapshot is older than 6 hours it is refreshed first from Etsy's public API (like competitor_snapshot, allowed in every mode: it only reads public Etsy data and writes the local cache); if the refresh fails the old data is returned, labelled with its age (snapshot_age, refresh)."""
         return await wrap(comp.profile_fresh)(shop)
 
     return comp
@@ -404,7 +402,7 @@ async def _run_all(settings: Settings, delay: float) -> dict[str, Any]:
     etsy = EtsyClient(settings)
     db = ResearchDB(settings.research_db)
     try:
-        result = await Competitors(etsy, db, settings.mode).snapshot_all(delay)
+        result = await Competitors(etsy, db).snapshot_all(delay)
     finally:
         await etsy.aclose()
     try:  # retention: age out old Etsy-sourced cache rows at the end of every run

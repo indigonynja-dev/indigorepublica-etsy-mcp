@@ -153,19 +153,20 @@ async def test_profile_refresh_failure_returns_old_data_labelled_with_its_age(ri
     assert len(fake.calls) == calls and "not retrying" in again["refresh"]["note"] and again["listing_count"] == 3
 
 
-async def test_profile_readonly_mode_never_refreshes(rig):
-    c, fake, db = rig
-    await c.add("rival")
-    await c.snapshot("rival")
+async def test_profile_refresh_is_allowed_in_every_mode(env):
+    """Like competitor_snapshot: only reads public Etsy data and writes the local cache, so readonly mode still refreshes."""
+    s, fake, _ = env
+    s.mode = "readonly"
+    pub = FakePublicEtsy({11: [_raw(1)], 22: []})
+    db = ResearchDB(s.research_db)
+    comp = Competitors(EtsyClient(s, transport=httpx.MockTransport(pub)), db)
+    await comp.add("rival")
+    await comp.snapshot("rival")
     _age_snapshot(db, 50)
-    n = len(fake.calls)
-    c.mode = "readonly"
-    p = await c.profile_fresh("rival")
-    assert len(fake.calls) == n and "readonly" in p["refresh"]["note"] and p["stale"] and "2d old" in p["snapshot_age"]
-    assert db.stats()["tables"]["competitor_snapshots"]["rows"] == 1
-    with pytest.raises(CompetitorError, match="No snapshots"):
-        await c.add("other")
-        await c.profile_fresh("other")
+    async with Client(build_server(s, transport=httpx.MockTransport(lambda r: pub(r) if r.headers.get("authorization") is None else fake(r)))) as c:
+        p = (await c.call_tool("competitor_profile", {"shop": "rival"})).structured_content
+    assert p["refresh"]["refreshed"] and not p["stale"]
+    assert db.stats()["tables"]["competitor_snapshots"]["rows"] == 2
 
 
 async def test_diff_shows_both_snapshot_dates(rig):
@@ -229,6 +230,13 @@ def test_scrub_removes_buyer_fields_and_keeps_the_rest():
     assert out["receipt_id"] == 5551 and out["status"] == "paid" and out["grandtotal"]["amount"] == 1299
     assert out["transactions"][0]["title"] == "Budget Planner" and out["transactions"][0]["variations"][0]["formatted_value"] == BUYER_REMOVED
     assert out["shipments"][0]["tracking_code"] == "9400111"
+
+
+def test_scrub_removes_phone_numbers_from_free_text_but_not_ids_dates_or_amounts():
+    for phone in ("+1 555-010-1234", "(555) 010-1234", "555.010.1234", "+44 20 7946 0958", "+15550101234"):
+        assert scrub_buyer_data(f"call {phone} now") == f"call {BUYER_REMOVED} now", phone
+    safe = "listing 1234567890 at 2026-10-05 20:12:33, price 1,299.00 USD, receipt 5551, tracking 9400111, v1.2.3"
+    assert scrub_buyer_data(safe) == safe
 
 
 def test_scrub_leaves_listing_state_and_shop_names_alone():

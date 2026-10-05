@@ -186,11 +186,14 @@ _ANCHOR_KEYS = frozenset({
     "buyer_name", "ship_to_name", "postal_code",
 })
 EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+")
+# Separated phone numbers ("+1 555-010-1234", "(555) 010-1234", "555.010.1234") or +E.164. Needs separators between digit groups, so
+# ids, dates ("2026-10-05"), times and amounts are left alone.
+PHONE_RE = re.compile(r"(?<![\w.])(?:\+\d{7,15}|(?:\+\d{1,3}[\s.\-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.\-]\d{3,4}[\s.\-]\d{3,4})(?!\w)")
 
 
 def scrub_buyer_data(obj: Any) -> Any:
     """Copy of obj with buyer personal data replaced by "[BUYER_DATA_REMOVED]": names, address lines, city/state/zip/country,
-    emails, phone numbers, buyer user ids, gift messages and personalization text. Applied before anything reaches write_log."""
+    emails, phone numbers (also inside free text), buyer user ids, gift messages and personalization text. Applied before anything reaches write_log."""
     if isinstance(obj, dict):
         anchored = any(str(k).lower() in _ANCHOR_KEYS for k in obj)
         label = str(obj.get("formatted_name") or obj.get("property_name") or "").lower()
@@ -214,7 +217,7 @@ def scrub_buyer_data(obj: Any) -> Any:
                 return json.dumps(scrub_buyer_data(json.loads(t)), ensure_ascii=False)
             except ValueError:
                 pass
-        return EMAIL_RE.sub(BUYER_REMOVED, obj)
+        return PHONE_RE.sub(BUYER_REMOVED, EMAIL_RE.sub(BUYER_REMOVED, obj))
     return obj
 
 
