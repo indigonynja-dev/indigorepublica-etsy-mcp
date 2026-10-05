@@ -327,7 +327,7 @@ ETSY_WRITES = {  # tool -> arguments: change something on Etsy without deleting 
 }
 LOCAL_WRITES = {  # change only this server's own SQLite cache, never Etsy: allowed in every mode.
     "competitor_add", "competitor_remove", "competitor_snapshot", "competitor_snapshot_all", "research_save_keywords",
-    "research_save_market_listings", "seo_audit", "seo_preview_update",
+    "research_save_market_listings", "seo_audit", "seo_preview_update", "competitor_profile", "research_prune",
 }
 DELETE_CASES = [pytest.param(tool, args, id=case) for case, (tool, args) in DELETES.items()]
 ETSY_WRITE_CASES = [pytest.param(tool, args, id=tool) for tool, args in ETSY_WRITES.items()]
@@ -404,6 +404,8 @@ async def test_local_tools_work_in_every_mode_and_never_write_to_etsy(env, mode)
         ("competitor_snapshot_all", {"delay_seconds": 0}),
         ("seo_audit", {"listing_id": 10}),
         ("seo_preview_update", {"listing_id": 10, "title": "Budget Planner Spreadsheet"}),
+        ("competitor_profile", {"shop": "rival"}),
+        ("research_prune", {"dry_run": False}),
         ("competitor_remove", {"shop": "rival"}),
     ]
     async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
@@ -464,11 +466,11 @@ async def test_seo_apply_update_logs_every_refusal_once_and_a_success_once(env):
 
 
 # ----------------------------------------------------------------------------- the README's numbers stay true
-EXPECTED_TOOLS = 52
+EXPECTED_TOOLS = 53
 RESOURCE_URIS = ["etsy://shop/listings", "etsy://keywords/{seed}", "etsy://competitor/{shop}", "etsy://audit/{listing_id}", "etsy://writes/recent"]
 
 
-async def test_tool_count_is_52_and_matches_the_readme(env):
+async def test_tool_count_is_53_and_matches_the_readme(env):
     s, fake, _ = env
     async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
         tools = (await c.list_tools()).tools

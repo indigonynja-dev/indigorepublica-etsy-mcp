@@ -110,15 +110,14 @@ def register(mcp: Any, *, research: ResearchDB, competitors: Competitors, etsy: 
 
     @mcp.resource(COMPETITOR_URI, name="latest_competitor_profile", title="Competitor profile", mime_type=JSON,
                   description="Profile of a watched competitor from its latest stored snapshot: listing count, price median/p25/p75, top tags, "
-                              "newest listings, average listing age. {shop} is the shop name or id. Local cache only, no Etsy call; "
+                              "newest listings, average listing age. Starts with snapshot_age (when it was taken, how old, STALE after 6 hours). {shop} is the shop name or id. Local cache only, no Etsy call; "
                               "add the shop with competitor_add and snapshot it with competitor_snapshot first.")
     def latest_competitor_profile(shop: str) -> dict[str, Any]:
         try:
             profile = competitors.profile(shop)
         except CompetitorError as e:
             raise ResourceNotFoundError(str(e)) from e
-        profile["snapshot_age_days"] = age_days(profile["snapshot_taken_at"])
-        return profile
+        return profile  # snapshot_age / snapshot_age_hours / stale come first in the profile itself
 
     @mcp.resource(AUDIT_URI, name="latest_seo_audit", title="Latest SEO audit", mime_type=JSON,
                   description="The most recent stored seo_audit report for a listing: score, sub-scores, prioritized fixes, audited_at and "

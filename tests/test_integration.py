@@ -21,14 +21,15 @@ from .fakes import FullFake, ShopFake
 from .test_resources import NOT_FOUND, read, read_error
 from .test_server import _free_port, env  # noqa: F401  (env fixture)
 
-# The 17 tools added after the original 35: research cache + write log, competitor tracking, SEO.
+# The 18 tools added after the original 35: research cache + write log + pruning, competitor tracking, SEO.
 NEW_TOOLS = {
-    "research_save_keywords", "research_save_market_listings", "research_get_keywords", "research_get_market", "research_cache_stats",
+    "research_save_keywords", "research_save_market_listings", "research_get_keywords", "research_get_market", "research_cache_stats", "research_prune",
     "etsy_write_log",
     "competitor_add", "competitor_remove", "competitor_list", "competitor_snapshot", "competitor_snapshot_all", "competitor_diff",
     "competitor_profile",
     "seo_audit", "seo_tag_gaps", "seo_preview_update", "seo_apply_update",
 }
+VOLATILE_PROFILE = {"snapshot_age_days", "snapshot_age_hours", "snapshot_age", "refresh"}
 RESOURCES = {"etsy://shop/listings", "etsy://writes/recent", "etsy://keywords/{seed}", "etsy://competitor/{shop}", "etsy://audit/{listing_id}"}
 
 
@@ -43,7 +44,7 @@ async def test_handshake_advertises_tools_prompts_and_resources(env):
         names = {t.name for t in (await c.list_tools()).tools}
         listed = {str(r.uri) for r in (await c.list_resources()).resources}
         listed |= {t.uri_template for t in (await c.list_resource_templates()).resource_templates}
-    assert NEW_TOOLS <= names and len(names - NEW_TOOLS) == 35, "35 original tools + the 17 newer ones"
+    assert NEW_TOOLS <= names and len(names - NEW_TOOLS) == 35, "35 original tools + the 18 newer ones"
     assert listed == RESOURCES
 
 
@@ -82,7 +83,7 @@ async def test_every_new_tool_and_resource_through_one_mcp_session(env):
         assert diff["summary"]["total_changes"] == 0 and diff["summary"]["listings_after"] == 4
         profile = await tool("competitor_profile", {"shop": "rival"})
         assert profile["listing_count"] == 4 and profile["top_tags"][0] == {"tag": "planner", "count": 4}
-        assert {k: v for k, v in (await read(c, "etsy://competitor/rival")).items() if k != "snapshot_age_days"} == profile
+        assert {k: v for k, v in (await read(c, "etsy://competitor/rival")).items() if k not in VOLATILE_PROFILE} == {k: v for k, v in profile.items() if k not in VOLATILE_PROFILE}
 
         # ---- SEO: audit -> tag gaps -> preview -> apply
         audit = await tool("seo_audit", {"listing_id": 10})
@@ -101,6 +102,7 @@ async def test_every_new_tool_and_resource_through_one_mcp_session(env):
         log = (await tool("etsy_write_log"))["entries"]
         assert [e["tool"] for e in log] == ["seo_apply_update"] and log[0]["result"] == "ok" and log[0]["listing_id"] == 10
         assert (await read(c, "etsy://writes/recent"))["entries"] == log
+        assert (await tool("research_prune"))["dry_run"] is True
         stats = (await tool("research_cache_stats"))["tables"]
         assert (stats["keywords"]["rows"], stats["market_listings"]["rows"], stats["competitor_snapshots"]["rows"],
                 stats["audits"]["rows"], stats["write_log"]["rows"]) == (2, 1, 2, 1, 1)
@@ -184,7 +186,7 @@ async def test_real_stdio_process_handshake_tools_and_resources(tmp_path):
         async with Client(stdio_client(params, errlog=stderr), read_timeout_seconds=60) as c:
             assert c.server_info.name == "indigorepublica-etsy"
             names = {t.name for t in (await c.list_tools()).tools}
-            assert len(names) == 52 and NEW_TOOLS <= names
+            assert len(names) == 53 and NEW_TOOLS <= names
             assert {str(r.uri) for r in (await c.list_resources()).resources} == {"etsy://shop/listings", "etsy://writes/recent"}
             kw = await read(c, "etsy://keywords/budget")
             assert kw["count"] == 1 and kw["rows"][0]["searches"] == 12000
@@ -195,4 +197,4 @@ async def test_real_stdio_process_handshake_tools_and_resources(tmp_path):
             # a tool that needs credentials fails cleanly (no key configured, no network attempted) and the server keeps serving
             assert (await c.call_tool("etsy_whoami", {})).is_error
             assert (await c.call_tool("etsy_seo_check", {"title": "Monthly Budget Planner Spreadsheet Template"})).structured_content["ok"] is True
-            assert len((await c.list_tools()).tools) == 52
+            assert len((await c.list_tools()).tools) == 53

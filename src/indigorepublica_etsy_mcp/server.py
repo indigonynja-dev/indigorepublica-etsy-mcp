@@ -226,6 +226,12 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             raise ToolError(str(e)) from e
 
     research = ResearchDB(settings.research_db)
+    try:  # retention: age out old Etsy-sourced cache rows on every start
+        pruned = research.prune(settings.cache_retention_days)
+        if pruned["total_rows"]:
+            log.info("pruned %s cache rows older than %s days", pruned["total_rows"], settings.cache_retention_days)
+    except Exception:  # noqa: BLE001 - never block startup
+        log.exception("cache pruning failed")
     listings_cache = resources.ListingsCache()
 
     class WriteEntry:
@@ -953,6 +959,15 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     async def research_cache_stats() -> dict[str, Any]:
         """Row counts and oldest/newest timestamps for every research table (keywords, market_listings, competitor_snapshots, audits, write_log), plus db path and schema version."""
         return research.stats()
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
+    async def research_prune(dry_run: bool = True, retention_days: int | None = None) -> dict[str, Any]:
+        """Preview (default) or run retention pruning of the local cache: deletes competitor_snapshots, market_listings and keyword rows older than ETSY_CACHE_RETENTION_DAYS (default 90; retention_days overrides it for this call). The write log, audits and SEO previews are never pruned. dry_run=True only counts what would go. Local only: no Etsy call."""
+        days = retention_days if retention_days is not None else settings.cache_retention_days
+        try:
+            return research.prune(days, dry_run)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
 
     @mcp.tool(annotations=LOCAL)
     async def etsy_write_log(limit: int = 50, listing_id: int | None = None) -> dict[str, Any]:

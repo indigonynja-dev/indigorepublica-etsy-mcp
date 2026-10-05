@@ -277,7 +277,7 @@ async def test_competitor_resource(env):
         assert await read(c, "etsy://competitor/rival") == p  # case-insensitive name
         assert (await read(c, "etsy://competitor/11"))["shop_name"] == "Rival"  # or numeric id
         tool = (await c.call_tool("competitor_profile", {"shop": "rival"})).structured_content
-        assert {k: v for k, v in p.items() if k != "snapshot_age_days"} == tool, "the resource and the tool must agree"
+        assert {k: v for k, v in p.items() if k not in ("snapshot_age_days", "snapshot_age_hours", "refresh")} == {k: v for k, v in tool.items() if k not in ("snapshot_age_days", "snapshot_age_hours", "refresh")}, "the resource and the tool must agree"
         e = await read_error(c, "etsy://competitor/other")  # watched but never snapshotted
         assert e.code == NOT_FOUND and "No snapshots" in str(e) and "competitor_snapshot" in str(e)
         e = await read_error(c, "etsy://competitor/nobody")
@@ -403,4 +403,4 @@ async def test_resources_are_not_exposed_as_tools(env):
     async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
         names = {t.name for t in (await c.list_tools()).tools}
     assert not any(n.startswith(("resource", "etsy_resource")) for n in names)
-    assert len(names) == 52, "adding resources must not change the tool count"
+    assert len(names) == 53, "adding resources must not change the tool count"
