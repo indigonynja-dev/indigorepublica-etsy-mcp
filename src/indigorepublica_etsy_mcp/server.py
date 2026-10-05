@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -28,6 +29,7 @@ from . import __version__
 from .client import EtsyClient, EtsyError
 from .config import Settings, load_settings
 from .oas import SpecIndex
+from .research import ResearchDB
 
 log = logging.getLogger("indigorepublica_etsy_mcp")
 
@@ -35,6 +37,8 @@ RO = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 LOCAL = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
 DELETE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True)
+
+LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
 LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
 UPDATABLE_LISTING_FIELDS = {
@@ -54,6 +58,8 @@ Rules of the road:
 - Run etsy_seo_check before creating or retitling a listing and fix any errors it reports.
 - Money comes back as decimals in the shop currency. Timestamps are ISO-8601 UTC.
 - Prefer the specific tools; use etsy_find_endpoint + etsy_api_request only for gaps.
+- Every write to Etsy is recorded in a local append-only log (etsy_write_log).
+- Market data comes from other tools (e.g. ProfitTree); cache it with research_save_* and reuse it via research_get_* before re-fetching.
 - File uploads read from the server's allowed folders (ETSY_UPLOAD_DIRS) or from https URLs.
 The term 'Etsy' is a trademark of Etsy, Inc. This tool uses the Etsy API but is not endorsed or certified by Etsy, Inc."""
 
@@ -215,6 +221,39 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         except FileNotFoundError as e:
             raise ToolError(str(e)) from e
 
+    research = ResearchDB(settings.research_db)
+
+    class WriteEntry:
+        def __init__(self, request: Any) -> None:
+            self.request, self.before, self.response = request, None, None
+
+    @asynccontextmanager
+    async def wlog(tool: str, listing_id: int | None = None, request: Any = None, dry_run: bool = False):
+        """Record one write attempt (success, rejection or failure) in the append-only write log. Never masks the real error."""
+        entry = WriteEntry(request)
+        result = "ok"
+        try:
+            yield entry
+        except Exception as e:
+            result = f"error: {e}"
+            raise
+        finally:
+            try:
+                research.log_write(tool, listing_id, settings.mode, dry_run, entry.before,
+                                   {"request": entry.request, "response": entry.response}, result)
+            except Exception:  # noqa: BLE001 - logging must never break a tool
+                log.exception("write log failed for %s", tool)
+
+    async def peek(path: str, keys: list[str] | None = None, shape: Any = None) -> Any:
+        """Best-effort read of current state for the log's 'before'. Returns None on any failure."""
+        try:
+            data = await etsy.request("GET", path)
+        except Exception:  # noqa: BLE001
+            return None
+        if shape:
+            return shape(data)
+        return {k: data.get(k) for k in keys} if keys else data
+
     async def sid() -> str:
         try:
             return await etsy.shop_id()
@@ -298,12 +337,16 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         policy_additional: str | None = None,
     ) -> dict[str, Any]:
         """Update shop text: title (headline), announcement, sale_message (sent to buyers after purchase), digital_sale_message (sent with digital downloads), policy_additional. Only passed fields change."""
-        guard("write")
         fields = {k: v for k, v in dict(title=title, announcement=announcement, sale_message=sale_message,
                                         digital_sale_message=digital_sale_message, policy_additional=policy_additional).items() if v is not None}
-        if not fields:
-            raise ToolError("Pass at least one field to change.")
-        return await call("PUT", f"/shops/{await sid()}", form=fields)
+        async with wlog("etsy_update_shop", None, fields) as w:
+            guard("write")
+            if not fields:
+                raise ToolError("Pass at least one field to change.")
+            shop = await sid()
+            w.before = await peek(f"/shops/{shop}", keys=list(fields))
+            w.response = await call("PUT", f"/shops/{shop}", form=fields)
+            return w.response
 
     @mcp.tool(annotations=RO)
     async def etsy_list_shop_sections() -> dict[str, Any]:
@@ -315,8 +358,10 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     @mcp.tool(annotations=WRITE)
     async def etsy_create_shop_section(title: str) -> dict[str, Any]:
         """Create a shop section (e.g. 'Budget Spreadsheets'). Returns its shop_section_id."""
-        guard("write")
-        return await call("POST", f"/shops/{await sid()}/sections", form={"title": title})
+        async with wlog("etsy_create_shop_section", None, {"title": title}) as w:
+            guard("write")
+            w.response = await call("POST", f"/shops/{await sid()}/sections", form={"title": title})
+            return w.response
 
     # ======================================================================= LISTINGS
     @mcp.tool(annotations=RO)
@@ -366,12 +411,6 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> dict[str, Any]:
         """Create a DRAFT listing (no fee until published). Defaults suit digital downloads: type=download, who_made=i_did, when_made=made_to_order, quantity=999.
         Physical items also need shipping_profile_id (and readiness_state_id). Find taxonomy_id with etsy_search_taxonomy. Up to 13 tags, 20 chars each."""
-        guard("write")
-        check = seo_check(title, tags or [], description, materials or [])
-        if not check["ok"]:
-            raise ToolError("Fix before creating: " + " | ".join(check["errors"]))
-        if type != "download" and not shipping_profile_id:
-            raise ToolError("Physical listings need shipping_profile_id (see etsy_list_shipping_profiles).")
         body: dict[str, Any] = {
             "title": title, "description": description, "price": price, "quantity": quantity,
             "taxonomy_id": taxonomy_id, "who_made": who_made, "when_made": when_made, "is_supply": is_supply,
@@ -379,37 +418,54 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             "shipping_profile_id": shipping_profile_id, "readiness_state_id": readiness_state_id,
         }
         body.update(extra_fields or {})
-        res = await call("POST", f"/shops/{await sid()}/listings", form=body)
-        return {"listing": listing_summary(res), "seo_warnings": check["warnings"]}
+        async with wlog("etsy_create_draft_listing", None, body) as w:
+            guard("write")
+            check = seo_check(title, tags or [], description, materials or [])
+            if not check["ok"]:
+                raise ToolError("Fix before creating: " + " | ".join(check["errors"]))
+            if type != "download" and not shipping_profile_id:
+                raise ToolError("Physical listings need shipping_profile_id (see etsy_list_shipping_profiles).")
+            res = await call("POST", f"/shops/{await sid()}/listings", form=body)
+            w.response = res
+            return {"listing": listing_summary(res), "seo_warnings": check["warnings"]}
+
+    async def update_listing(tool: str, listing_id: int, fields: dict[str, Any], confirm_publish_fee: bool) -> dict[str, Any]:
+        async with wlog(tool, listing_id, fields) as w:
+            guard("write")
+            unknown = set(fields) - UPDATABLE_LISTING_FIELDS
+            if unknown:
+                raise ToolError(f"Unknown fields {sorted(unknown)}. Allowed: {sorted(UPDATABLE_LISTING_FIELDS)}")
+            if fields.get("state") == "active" and not confirm_publish_fee:
+                raise ToolError("Publishing charges Etsy's listing fee. Get the user's OK, then retry with confirm_publish_fee=true.")
+            if any(k in fields for k in ("title", "tags", "materials")):
+                check = seo_check(fields.get("title", ""), fields.get("tags"), "", fields.get("materials"))
+                if not check["ok"]:
+                    raise ToolError("Fix before updating: " + " | ".join(check["errors"]))
+            w.before = await peek(f"/listings/{listing_id}", keys=list(fields))
+            res = await call("PATCH", f"/shops/{await sid()}/listings/{listing_id}", form=fields)
+            w.response = res
+            return {"listing": listing_summary(res)}
 
     @mcp.tool(annotations=WRITE)
     async def etsy_update_listing(listing_id: int, fields: dict[str, Any], confirm_publish_fee: bool = False) -> dict[str, Any]:
         """Patch a listing. fields may include title, description, price, quantity, tags, materials, taxonomy_id, shop_section_id, who_made, when_made, should_auto_renew, state, etc.
         Setting state='active' publishes and charges Etsy's listing fee: requires confirm_publish_fee=true. state='inactive' deactivates."""
-        guard("write")
-        unknown = set(fields) - UPDATABLE_LISTING_FIELDS
-        if unknown:
-            raise ToolError(f"Unknown fields {sorted(unknown)}. Allowed: {sorted(UPDATABLE_LISTING_FIELDS)}")
-        if fields.get("state") == "active" and not confirm_publish_fee:
-            raise ToolError("Publishing charges Etsy's listing fee. Get the user's OK, then retry with confirm_publish_fee=true.")
-        if any(k in fields for k in ("title", "tags", "materials")):
-            check = seo_check(fields.get("title", ""), fields.get("tags"), "", fields.get("materials"))
-            if not check["ok"]:
-                raise ToolError("Fix before updating: " + " | ".join(check["errors"]))
-        res = await call("PATCH", f"/shops/{await sid()}/listings/{listing_id}", form=fields)
-        return {"listing": listing_summary(res)}
+        return await update_listing("etsy_update_listing", listing_id, fields, confirm_publish_fee)
 
     @mcp.tool(annotations=WRITE)
     async def etsy_publish_listing(listing_id: int, confirm_publish_fee: bool = False) -> dict[str, Any]:
         """Publish a draft or inactive listing (state=active). Charges Etsy's listing fee, so only call after the user explicitly approves; pass confirm_publish_fee=true.
         Etsy requires at least one image (and, for downloads, at least one file) before a listing can go live."""
-        return await etsy_update_listing(listing_id, {"state": "active"}, confirm_publish_fee)
+        return await update_listing("etsy_publish_listing", listing_id, {"state": "active"}, confirm_publish_fee)
 
     @mcp.tool(annotations=DELETE)
     async def etsy_delete_listing(listing_id: int) -> dict[str, Any]:
         """Permanently delete a listing. Blocked unless ETSY_MCP_MODE=full. Prefer etsy_update_listing state='inactive' to hide it instead."""
-        guard("delete")
-        return await call("DELETE", f"/listings/{listing_id}")
+        async with wlog("etsy_delete_listing", listing_id, {"listing_id": listing_id}) as w:
+            guard("delete")
+            w.before = await peek(f"/listings/{listing_id}", shape=listing_summary)
+            w.response = await call("DELETE", f"/listings/{listing_id}")
+            return w.response
 
     # ---- images
     @mcp.tool(annotations=RO)
@@ -432,17 +488,25 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Add a photo to a listing from ONE source: file_path (inside ETSY_UPLOAD_DIRS), file_url (https), or file_base64 (+filename). rank 1 = primary image."""
-        guard("write")
-        name, data, mime = await load_blob(file_path, file_url, file_base64, filename)
-        form = {"rank": rank, "alt_text": alt_text, "overwrite": overwrite if rank else None}
-        res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/images", form=form, files={"image": (name, data, mime)})
-        return {"listing_image_id": res.get("listing_image_id"), "rank": res.get("rank"), "url": res.get("url_fullxfull")}
+        req = {"listing_id": listing_id, "source": file_path or file_url or "base64", "filename": filename, "rank": rank,
+               "alt_text": alt_text, "overwrite": overwrite}
+        async with wlog("etsy_upload_listing_image", listing_id, req) as w:
+            guard("write")
+            name, data, mime = await load_blob(file_path, file_url, file_base64, filename)
+            req["bytes"] = len(data)
+            form = {"rank": rank, "alt_text": alt_text, "overwrite": overwrite if rank else None}
+            res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/images", form=form, files={"image": (name, data, mime)})
+            w.response = out = {"listing_image_id": res.get("listing_image_id"), "rank": res.get("rank"), "url": res.get("url_fullxfull")}
+            return out
 
     @mcp.tool(annotations=DELETE)
     async def etsy_delete_listing_image(listing_id: int, listing_image_id: int) -> dict[str, Any]:
         """Remove a photo from a listing. Blocked unless ETSY_MCP_MODE=full."""
-        guard("delete")
-        return await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/images/{listing_image_id}")
+        req = {"listing_id": listing_id, "listing_image_id": listing_image_id}
+        async with wlog("etsy_delete_listing_image", listing_id, req) as w:
+            guard("delete")
+            w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/images/{listing_image_id}")
+            return w.response
 
     # ---- digital files
     @mcp.tool(annotations=RO)
@@ -464,17 +528,24 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> dict[str, Any]:
         """Attach a downloadable file (PDF, XLSX, ZIP...) to a digital listing from ONE source: file_path, file_url (https) or file_base64 (+filename).
         name = filename buyers see. Etsy caps digital files per listing (5 at time of writing) and size per file."""
-        guard("write")
-        fname, data, mime = await load_blob(file_path, file_url, file_base64, filename)
-        res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/files",
-                         form={"name": name or fname, "rank": rank}, files={"file": (fname, data, mime)})
-        return {"listing_file_id": res.get("listing_file_id"), "filename": res.get("filename"), "size": res.get("filesize")}
+        req = {"listing_id": listing_id, "source": file_path or file_url or "base64", "filename": filename, "name": name, "rank": rank}
+        async with wlog("etsy_upload_listing_file", listing_id, req) as w:
+            guard("write")
+            fname, data, mime = await load_blob(file_path, file_url, file_base64, filename)
+            req["bytes"] = len(data)
+            res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/files",
+                             form={"name": name or fname, "rank": rank}, files={"file": (fname, data, mime)})
+            w.response = out = {"listing_file_id": res.get("listing_file_id"), "filename": res.get("filename"), "size": res.get("filesize")}
+            return out
 
     @mcp.tool(annotations=DELETE)
     async def etsy_delete_listing_file(listing_id: int, listing_file_id: int) -> dict[str, Any]:
         """Remove a downloadable file from a listing. Blocked unless ETSY_MCP_MODE=full."""
-        guard("delete")
-        return await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/files/{listing_file_id}")
+        req = {"listing_id": listing_id, "listing_file_id": listing_file_id}
+        async with wlog("etsy_delete_listing_file", listing_id, req) as w:
+            guard("delete")
+            w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/files/{listing_file_id}")
+            return w.response
 
     # ---- inventory
     @mcp.tool(annotations=RO)
@@ -486,10 +557,13 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     async def etsy_update_listing_inventory(listing_id: int, inventory: dict[str, Any]) -> dict[str, Any]:
         """Replace a listing's inventory. Pass the full object Etsy expects: {products:[{sku, property_values, offerings:[{price, quantity, is_enabled}]}], price_on_property, quantity_on_property, sku_on_property}.
         Read it first with etsy_get_listing_inventory, edit, then send it back whole."""
-        guard("write")
-        if "products" not in inventory:
-            raise ToolError("inventory must include 'products'. Start from etsy_get_listing_inventory output.")
-        return await call("PUT", f"/listings/{listing_id}/inventory", json=inventory)
+        async with wlog("etsy_update_listing_inventory", listing_id, inventory) as w:
+            guard("write")
+            if "products" not in inventory:
+                raise ToolError("inventory must include 'products'. Start from etsy_get_listing_inventory output.")
+            w.before = await peek(f"/listings/{listing_id}/inventory")
+            w.response = await call("PUT", f"/listings/{listing_id}/inventory", json=inventory)
+            return w.response
 
     # ---- workflow: one-shot digital product
     @mcp.tool(annotations=WRITE)
@@ -512,7 +586,19 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         """One call: create a digital-download draft, upload images in order (first = primary), attach the files, optionally publish.
         Easiest with manifest_path -> a listing.json inside ETSY_UPLOAD_DIRS (paths in it resolve relative to its folder). Explicit args override the manifest.
         Leaves the listing as a draft unless publish=true AND confirm_publish_fee=true. Partial failures are reported, not hidden."""
-        guard("write")
+        # The sub-calls below each write their own log entries; this one is the summary.
+        async with wlog("etsy_create_digital_listing", None, {"manifest_path": manifest_path, "title": title, "publish": publish}) as w:
+            guard("write")
+            report = await _create_digital_listing(
+                manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
+                image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee)
+            w.response = report
+            lid = report.get("listing_id")
+            w.request["listing_id"] = lid
+            return report
+
+    async def _create_digital_listing(manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
+                                      image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee) -> dict[str, Any]:
         m: dict[str, Any] = {}
         base: Path | None = None
         if manifest_path:
@@ -678,9 +764,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     @mcp.tool(annotations=WRITE)
     async def etsy_add_tracking(receipt_id: int, tracking_code: str, carrier_name: str, note_to_buyer: str | None = None, send_bcc: bool = False) -> dict[str, Any]:
         """Mark a physical order shipped with tracking (sends Etsy's shipping notification to the buyer). carrier_name like 'usps', 'ups', 'fedex'."""
-        guard("write")
-        return await call("POST", f"/shops/{await sid()}/receipts/{receipt_id}/tracking",
-                          form={"tracking_code": tracking_code, "carrier_name": carrier_name, "note_to_buyer": note_to_buyer, "send_bcc": send_bcc})
+        form = {"tracking_code": tracking_code, "carrier_name": carrier_name, "note_to_buyer": note_to_buyer, "send_bcc": send_bcc}
+        async with wlog("etsy_add_tracking", None, {"receipt_id": receipt_id, **form}) as w:
+            guard("write")
+            w.response = await call("POST", f"/shops/{await sid()}/receipts/{receipt_id}/tracking", form=form)
+            return w.response
 
     @mcp.tool(annotations=RO)
     async def etsy_sales_summary(since: str, until: str | None = None, max_orders: int = 500) -> dict[str, Any]:
@@ -793,13 +881,59 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> Any:
         """Escape hatch: call any Etsy Open API v3 endpoint on this shop. path is relative to /v3/application, e.g. '/shops/{shop_id}/listings' ({shop_id} is filled in).
         Use form for x-www-form-urlencoded bodies (most POST/PATCH), json_body for JSON (inventory). Writes respect ETSY_MCP_MODE; DELETE needs full."""
-        if method != "GET":
-            guard("delete" if method == "DELETE" else "write")
         if "://" in path or not path.startswith("/") or ".." in path:
             raise ToolError("path must be a relative API path like '/shops/{shop_id}/sections'.")
-        if "{shop_id}" in path:
-            path = path.replace("{shop_id}", await sid())
-        return await call(method, path, params=query, form=form, json=json_body)
+        if method == "GET":
+            if "{shop_id}" in path:
+                path = path.replace("{shop_id}", await sid())
+            return await call(method, path, params=query)
+        async with wlog("etsy_api_request", None, {"method": method, "path": path, "query": query, "form": form, "json": json_body}) as w:
+            guard("delete" if method == "DELETE" else "write")
+            if "{shop_id}" in path:
+                path = path.replace("{shop_id}", await sid())
+            w.response = await call(method, path, params=query, form=form, json=json_body)
+            return w.response
+
+    # ======================================================================= RESEARCH CACHE & WRITE LOG
+    def _rows(rows: Any) -> list[dict[str, Any]]:
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ToolError("rows must be a list of objects.")
+        return rows
+
+    @mcp.tool(annotations=LOCAL_WRITE)
+    async def research_save_keywords(rows: list[dict[str, Any]], source: str = "profittree") -> dict[str, Any]:
+        """Store keyword rows Claude got from a research source (default 'profittree') in the local cache. Each row needs 'keyword'; optional searches, clicks, competition, digital_share, trend, niche_score (the full row is kept as raw_json).
+        Saving the same keyword+source again replaces it and refreshes its age. Local only: no Etsy call, allowed in every server mode."""
+        return research.save_keywords(_rows(rows), source.strip() or "profittree")
+
+    @mcp.tool(annotations=LOCAL_WRITE)
+    async def research_save_market_listings(rows: list[dict[str, Any]], keyword: str, source: str = "profittree") -> dict[str, Any]:
+        """Store competitor/market listings found for a keyword. Each row needs 'listing_id'; optional shop_id, title, price, tags (list), views, favorites, est_monthly_sales, est_monthly_revenue.
+        Same listing+keyword+source is replaced. Local only: no Etsy call, allowed in every server mode."""
+        try:
+            return research.save_market_listings(_rows(rows), keyword, source.strip() or "profittree")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool(annotations=LOCAL)
+    async def research_get_keywords(seed: str | None = None, max_age_days: float = 7, limit: int = 200) -> dict[str, Any]:
+        """Cached keyword rows (optionally those containing `seed`), best niche_score first, each with age_days and stale flag. status is fresh / partial / stale / missing; when stale or missing, re-fetch from the source and save again."""
+        return research.get_keywords(seed, max_age_days, limit)
+
+    @mcp.tool(annotations=LOCAL)
+    async def research_get_market(keyword: str, max_age_days: float = 7, limit: int = 200) -> dict[str, Any]:
+        """Cached market listings for an exact keyword with age_days/stale per row, plus a summary (avg price, total est. revenue). status is fresh / partial / stale / missing."""
+        return research.get_market(keyword, max_age_days, limit)
+
+    @mcp.tool(annotations=LOCAL)
+    async def research_cache_stats() -> dict[str, Any]:
+        """Row counts and oldest/newest timestamps for every research table (keywords, market_listings, competitor_snapshots, audits, write_log), plus db path and schema version."""
+        return research.stats()
+
+    @mcp.tool(annotations=LOCAL)
+    async def etsy_write_log(limit: int = 50, listing_id: int | None = None) -> dict[str, Any]:
+        """Read the append-only log of writes this server made (newest first): tool, listing_id, server mode, dry_run, before/after, result. Filter by listing_id. Nothing can delete rows."""
+        return {"entries": research.read_write_log(limit, listing_id)}
 
     # ======================================================================= PROMPTS
     @mcp.prompt()
