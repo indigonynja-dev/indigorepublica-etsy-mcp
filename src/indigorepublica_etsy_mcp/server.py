@@ -239,8 +239,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             raise
         finally:
             try:
+                tok = etsy.tokens.load() if settings.token_file.exists() else {}
+                secrets = tuple(str(v) for v in (settings.keystring, settings.shared_secret, settings.api_key_header,
+                                                 tok.get("access_token"), tok.get("refresh_token"), settings.auth_token) if v)
                 research.log_write(tool, listing_id, settings.mode, dry_run, entry.before,
-                                   {"request": entry.request, "response": entry.response}, result)
+                                   {"request": entry.request, "response": entry.response}, result, secrets)
             except Exception:  # noqa: BLE001 - logging must never break a tool
                 log.exception("write log failed for %s", tool)
 
@@ -268,6 +271,13 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         if not path.is_file():
             raise ToolError(f"File not found: {path}")
         return path
+
+    def _blob_name(file_path: str | None, file_url: str | None, filename: str | None) -> str | None:
+        if filename:
+            return filename
+        if file_path:
+            return Path(file_path).name
+        return (Path(httpx.URL(file_url).path).name or None) if file_url else None
 
     async def load_blob(file_path: str | None, file_url: str | None, file_base64: str | None, filename: str | None) -> tuple[str, bytes, str]:
         cap = settings.max_upload_mb * 1024 * 1024
@@ -488,12 +498,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Add a photo to a listing from ONE source: file_path (inside ETSY_UPLOAD_DIRS), file_url (https), or file_base64 (+filename). rank 1 = primary image."""
-        req = {"listing_id": listing_id, "source": file_path or file_url or "base64", "filename": filename, "rank": rank,
-               "alt_text": alt_text, "overwrite": overwrite}
+        req = {"filename": _blob_name(file_path, file_url, filename), "bytes": None, "mime": None}  # never log content/paths/URLs
         async with wlog("etsy_upload_listing_image", listing_id, req) as w:
             guard("write")
             name, data, mime = await load_blob(file_path, file_url, file_base64, filename)
-            req["bytes"] = len(data)
+            req.update(filename=name, bytes=len(data), mime=mime)
             form = {"rank": rank, "alt_text": alt_text, "overwrite": overwrite if rank else None}
             res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/images", form=form, files={"image": (name, data, mime)})
             w.response = out = {"listing_image_id": res.get("listing_image_id"), "rank": res.get("rank"), "url": res.get("url_fullxfull")}
@@ -528,11 +537,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> dict[str, Any]:
         """Attach a downloadable file (PDF, XLSX, ZIP...) to a digital listing from ONE source: file_path, file_url (https) or file_base64 (+filename).
         name = filename buyers see. Etsy caps digital files per listing (5 at time of writing) and size per file."""
-        req = {"listing_id": listing_id, "source": file_path or file_url or "base64", "filename": filename, "name": name, "rank": rank}
+        req = {"filename": _blob_name(file_path, file_url, filename), "bytes": None, "mime": None}  # never log content/paths/URLs
         async with wlog("etsy_upload_listing_file", listing_id, req) as w:
             guard("write")
             fname, data, mime = await load_blob(file_path, file_url, file_base64, filename)
-            req["bytes"] = len(data)
+            req.update(filename=fname, bytes=len(data), mime=mime)
             res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/files",
                              form={"name": name or fname, "rank": rank}, files={"file": (fname, data, mime)})
             w.response = out = {"listing_file_id": res.get("listing_file_id"), "filename": res.get("filename"), "size": res.get("filesize")}

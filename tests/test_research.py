@@ -202,3 +202,80 @@ async def test_before_state_captured_when_available(env):  # noqa: F811
     assert not r.is_error, r.content
     e = (await call(server, "etsy_write_log", {"listing_id": 901})).structured_content["entries"][0]
     assert e["before"] == {"title": "Old title"}  # only the fields being changed
+
+
+# ----------------------------------------------------------------------------- log hygiene
+def _dump_log(path) -> str:
+    with closing(sqlite3.connect(path)) as con:
+        return "\n".join(str(tuple(r)) for r in con.execute("SELECT * FROM write_log"))
+
+
+async def test_write_log_never_stores_credentials(env):  # noqa: F811
+    s, fake, products = env
+    server = build_server(s, transport=httpx.MockTransport(fake))
+    r = await call(server, "etsy_api_request", {
+        "method": "POST", "path": "/shops/{shop_id}/sections",
+        "form": {"title": "X", "api_key": "KEY:SECRET", "Authorization": "Bearer 77.old", "client_token": "tok-123",
+                 "note": "leaks Bearer 77.fresh and SECRET in text"},
+        "json_body": {"nested": {"x-api-key": "KEY:SECRET", "shared_secret": "SECRET"}}})
+    assert r.is_error  # fake has no route; the failure result goes into the log too
+    await call(server, "etsy_update_listing", {"listing_id": 901, "fields": {"title": "Budget Planner Spreadsheet Template for Google Sheets"}})
+    stored = _dump_log(s.research_db)
+    assert "[REDACTED]" in stored
+    for secret in ("KEY:SECRET", "SECRET", "77.old", "77.fresh", "77.r1", "77.r2", "tok-123", "t0ken"):
+        assert secret not in stored, secret
+    for secret in ("Bearer 77",):
+        assert secret not in stored, secret
+    assert "x-api-key" not in stored.lower() or "[REDACTED]" in stored
+
+
+async def test_upload_log_holds_only_filename_size_type(env):  # noqa: F811
+    s, fake, products = env
+    server = build_server(s, transport=httpx.MockTransport(fake))
+    f = products / "files" / "Budget.xlsx"
+    r = await call(server, "etsy_upload_listing_file", {"listing_id": 901, "file_path": str(f), "name": "Shown name", "rank": 2})
+    assert not r.is_error, r.content
+    img = products / "images" / "cover.png"
+    r = await call(server, "etsy_upload_listing_image", {"listing_id": 901, "file_path": str(img), "alt_text": "alt", "rank": 1})
+    assert not r.is_error, r.content
+    entries = {e["tool"]: e for e in (await call(server, "etsy_write_log", {})).structured_content["entries"]}
+    file_row, img_row = entries["etsy_upload_listing_file"], entries["etsy_upload_listing_image"]
+    assert file_row["after"]["request"] == {"filename": "Budget.xlsx", "bytes": len(f.read_bytes()),
+                                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+    assert img_row["after"]["request"] == {"filename": "cover.png", "bytes": len(img.read_bytes()), "mime": "image/png"}
+    stored = _dump_log(s.research_db)
+    for needle in ("fake-xlsx", "PK\\x03", "PNG", str(products), "0000000000"):
+        assert needle not in stored, needle
+    # base64 uploads: content never logged either
+    import base64
+    b64 = base64.b64encode(b"SECRETPAYLOAD" * 10).decode()
+    await call(server, "etsy_upload_listing_file", {"listing_id": 901, "file_base64": b64, "filename": "x.pdf"})
+    stored = _dump_log(s.research_db)
+    assert b64[:20] not in stored and "SECRETPAYLOAD" not in stored and "x.pdf" in stored
+
+
+def test_redact_helper_masks_names_bytes_and_known_secrets():
+    from indigorepublica_etsy_mcp.research import redact
+
+    out = redact({"Authorization": "x", "a": {"X-Api-Key": "k", "refresh_token": "t", "client_secret": "s"}, "data": b"abc",
+                  "keywords": "kept", "msg": "has TOPSECRET inside", "list": [{"auth_header": 1}]}, ("TOPSECRET",))
+    assert out == {"Authorization": "[REDACTED]", "a": {"X-Api-Key": "[REDACTED]", "refresh_token": "[REDACTED]", "client_secret": "[REDACTED]"},
+                   "data": "[3 bytes omitted]", "keywords": "kept", "msg": "has [REDACTED] inside", "list": [{"auth_header": "[REDACTED]"}]}
+
+
+# ----------------------------------------------------------------------------- ProfitTree field names
+def test_profittree_shaped_rows(db):
+    r = db.save_keywords([{"keyword": "Budget Planner", "avg_monthly_searches": 12000, "avg_monthly_clicks": 4300, "competition": 8100,
+                           "digital_share": 0.82, "trend_direction": "up", "niche_score": 71.5}], "profittree")
+    assert r["saved"] == 1
+    k = db.get_keywords(None, 7)["rows"][0]
+    assert (k["searches"], k["clicks"], k["competition"], k["digital_share"], k["trend"], k["niche_score"]) == (12000, 4300, 8100, 0.82, "up", 71.5)
+    assert k["raw"]["trend_direction"] == "up"
+    db.save_keywords([{"keyword": "fallback", "search_volume": 5, "trend": "flat"}], "profittree")  # old aliases still work
+    fb = [x for x in db.get_keywords("fallback", 7)["rows"]][0]
+    assert fb["searches"] == 5 and fb["trend"] == "flat"
+    db.save_market_listings([{"listing_id": 123, "title": "Budget Planner", "price": 6.5, "views": 800, "favorites": 40,
+                              "monthly_sales": 55, "monthly_revenue": 357.5, "shop_id": 77, "shop_name": "SomeShop"}], "budget planner", "profittree")
+    m = db.get_market("budget planner", 7)["rows"][0]
+    assert (m["listing_id"], m["shop_id"], m["price"], m["views"], m["favorites"], m["est_monthly_sales"], m["est_monthly_revenue"]) == \
+        (123, 77, 6.5, 800, 40, 55, 357.5)

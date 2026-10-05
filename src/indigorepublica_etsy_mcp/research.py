@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -58,9 +59,11 @@ TABLES = {
     "audits": "created_at", "write_log": "ts",
 }
 
+# First name in each tuple is ProfitTree's (keyword_finder / product_finder); the rest are fallbacks.
 KEYWORD_ALIASES = {
-    "searches": ("search_volume", "monthly_searches", "volume"),
-    "clicks": ("est_clicks",),
+    "searches": ("avg_monthly_searches", "search_volume", "monthly_searches", "volume"),
+    "clicks": ("avg_monthly_clicks", "est_clicks"),
+    "trend": ("trend_direction",),
     "competition": ("competing_listings", "listings", "competitors"),
     "digital_share": ("digital_percent", "digital_pct"),
     "niche_score": ("score", "opportunity"),
@@ -68,7 +71,7 @@ KEYWORD_ALIASES = {
 LISTING_ALIASES = {
     "listing_id": ("id",),
     "favorites": ("num_favorers", "favorers", "favourites"),
-    "est_monthly_sales": ("monthly_sales", "est_sales"),
+    "est_monthly_sales": ("monthly_sales", "est_monthly_sales_count", "est_sales"),
     "est_monthly_revenue": ("monthly_revenue", "est_revenue"),
     "views": ("total_views",),
 }
@@ -118,6 +121,34 @@ def _dumps(obj: Any) -> str | None:
     if len(s) > MAX_LOG_JSON_CHARS:
         s = json.dumps({"truncated": True, "chars": len(s), "head": s[:MAX_LOG_JSON_CHARS]})
     return s
+
+
+SENSITIVE_PARTS = ("auth", "token", "key", "secret")
+REDACTED = "[REDACTED]"
+BEARER_RE = re.compile(r"Bearer\s+[\w.\-~+/=]+", re.IGNORECASE)
+
+
+def _sensitive_name(name: Any) -> bool:
+    n = str(name).lower()
+    # 'keyword(s)' is search data, not a credential; every other name containing "key" is redacted.
+    return any(p in n for p in SENSITIVE_PARTS) and not n.startswith("keyword")
+
+
+def redact(obj: Any, secrets: tuple[str, ...] = ()) -> Any:
+    """Copy of obj that is safe to persist: credential-like field names are masked, raw bytes are replaced by a size
+    note, and any known secret value is scrubbed from every string."""
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return f"[{len(obj)} bytes omitted]"
+    if isinstance(obj, dict):
+        return {k: (REDACTED if _sensitive_name(k) else redact(v, secrets)) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [redact(v, secrets) for v in obj]
+    if isinstance(obj, str):
+        for sec in secrets:
+            if sec:
+                obj = obj.replace(sec, REDACTED)
+        return BEARER_RE.sub(f"Bearer {REDACTED}", obj)
+    return obj
 
 
 def _loads(s: str | None) -> Any:
@@ -185,7 +216,7 @@ class ResearchDB:
                     skipped.append({"index": i, "reason": "missing 'keyword'"})
                     continue
                 g = lambda k: _pick(row, k, KEYWORD_ALIASES)  # noqa: E731
-                trend = row.get("trend")
+                trend = g("trend")
                 con.execute(
                     "INSERT OR REPLACE INTO keywords VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (kw, source, _num(g("searches")), _num(g("clicks")), _num(g("competition")), _num(g("digital_share")),
@@ -268,11 +299,13 @@ class ResearchDB:
         return {"db_path": str(self.path), "schema_version": self.schema_version(), "tables": out}
 
     # ------------------------------------------------------------------ write log
-    def log_write(self, tool: str, listing_id: int | None, mode: str, dry_run: bool, before: Any, after: Any, result: str) -> int:
+    def log_write(self, tool: str, listing_id: int | None, mode: str, dry_run: bool, before: Any, after: Any, result: str,
+                  secrets: tuple[str, ...] = ()) -> int:
+        before, after, result = redact(before, secrets), redact(after, secrets), redact(result or "", secrets)
         with closing(self._connect()) as con, con:
             cur = con.execute(
                 "INSERT INTO write_log (ts, tool, listing_id, mode, dry_run, before_json, after_json, result) VALUES (?,?,?,?,?,?,?,?)",
-                (now_iso(), tool, listing_id, mode, int(dry_run), _dumps(before), _dumps(after), (result or "")[:2000]))
+                (now_iso(), tool, listing_id, mode, int(dry_run), _dumps(before), _dumps(after), result[:2000]))
             return int(cur.lastrowid or 0)
 
     def read_write_log(self, limit: int = 50, listing_id: int | None = None) -> list[dict[str, Any]]:
