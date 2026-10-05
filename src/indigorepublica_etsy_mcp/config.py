@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +19,19 @@ TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 AUTH_URL = "https://www.etsy.com/oauth/connect"
 OAS_URL = "https://www.etsy.com/openapi/generated/oas/3.0.0.json"
 MODES = ("readonly", "safe", "full")
+
+log = logging.getLogger("indigorepublica_etsy_mcp")
+
+
+def migrate_legacy_data_dir(home: Path | None = None) -> bool:
+    """One-time move of the pre-rename data folder to the new name."""
+    base = home or Path.home()
+    old, new = base / (".nynja" + "-etsy-mcp"), base / ".indigorepublica-etsy-mcp"
+    if old.is_dir() and not new.exists():
+        shutil.move(str(old), str(new))
+        log.info("Moved data folder %s -> %s", old, new)
+        return True
+    return False
 
 
 def _load_env() -> None:
@@ -42,7 +57,7 @@ class Settings:
     redirect_uri: str = "http://localhost:3003/oauth/redirect"
     scopes: str = DEFAULT_SCOPES
     shop_id: str = ""
-    token_file: Path = field(default_factory=lambda: Path("~/.nynja-etsy-mcp/tokens.json").expanduser())
+    token_file: Path = field(default_factory=lambda: Path("~/.indigorepublica-etsy-mcp/tokens.json").expanduser())
     mode: str = "safe"
     upload_dirs: list[Path] = field(default_factory=list)
     max_qps: float = 4.0
@@ -69,6 +84,7 @@ class Settings:
 
 def load_settings() -> Settings:
     _load_env()
+    migrate_legacy_data_dir()
     env = os.environ.get
     mode = (env("ETSY_MCP_MODE") or "safe").strip().lower()
     if mode not in MODES:
@@ -79,7 +95,7 @@ def load_settings() -> Settings:
         redirect_uri=(env("ETSY_REDIRECT_URI") or "http://localhost:3003/oauth/redirect").strip(),
         scopes=" ".join((env("ETSY_SCOPES") or DEFAULT_SCOPES).split()),
         shop_id=(env("ETSY_SHOP_ID") or "").strip(),
-        token_file=Path(env("ETSY_TOKEN_FILE") or "~/.nynja-etsy-mcp/tokens.json").expanduser(),
+        token_file=Path(env("ETSY_TOKEN_FILE") or "~/.indigorepublica-etsy-mcp/tokens.json").expanduser(),
         mode=mode,
         upload_dirs=_paths(env("ETSY_UPLOAD_DIRS") or "~/etsy-products"),
         max_qps=float(env("ETSY_MAX_QPS") or 4),

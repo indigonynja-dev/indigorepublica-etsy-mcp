@@ -1,7 +1,7 @@
-"""Nynja Etsy MCP server: your own Etsy shop as Claude tools.
+"""IndigoRepublica Etsy MCP server: your own Etsy shop as Claude tools.
 
-Run:  uv run nynja-etsy-mcp                      # stdio (Claude Code)
-      uv run nynja-etsy-mcp --transport http     # Streamable HTTP (Claude.ai via tunnel)
+Run:  uv run indigorepublica-etsy-mcp                      # stdio (Claude Code)
+      uv run indigorepublica-etsy-mcp --transport http     # Streamable HTTP (Claude.ai via tunnel)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from .client import EtsyClient, EtsyError
 from .config import Settings, load_settings
 from .oas import SpecIndex
 
-log = logging.getLogger("nynja_etsy_mcp")
+log = logging.getLogger("indigorepublica_etsy_mcp")
 
 RO = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 LOCAL = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -191,8 +191,8 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     spec = SpecIndex(settings.oas_url, settings.token_file.parent / "etsy-oas.json")
     taxonomy_cache: dict[str, Any] = {}
     mcp = MCPServer(
-        name="nynja-etsy",
-        title="Nynja Etsy",
+        name="indigorepublica-etsy",
+        title="IndigoRepublica Etsy",
         description="Manage your own Etsy shop: listings, digital files, orders, money, reviews.",
         instructions=INSTRUCTIONS,
         version=__version__,
@@ -867,7 +867,7 @@ def build_http_app(settings: Settings, mcp: MCPServer) -> Any:
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Any) -> Any:
-        return JSONResponse({"ok": True, "server": "nynja-etsy", "version": __version__})
+        return JSONResponse({"ok": True, "server": "indigorepublica-etsy", "version": __version__})
 
     hosts = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*"]
     for h in settings.public_hosts:
@@ -890,7 +890,7 @@ def build_http_app(settings: Settings, mcp: MCPServer) -> Any:
 
 # ----------------------------------------------------------------------------- entrypoint
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Nynja Etsy MCP server")
+    ap = argparse.ArgumentParser(description="IndigoRepublica Etsy MCP server")
     ap.add_argument("--transport", choices=["stdio", "http"], default=os.environ.get("MCP_TRANSPORT", "stdio"))
     ap.add_argument("--host")
     ap.add_argument("--port", type=int)
@@ -906,7 +906,7 @@ def main() -> None:
     mcp = build_server(settings)
 
     if args.transport == "stdio":
-        log.info("nynja-etsy %s on stdio (mode=%s)", __version__, settings.mode)
+        log.info("indigorepublica-etsy %s on stdio (mode=%s)", __version__, settings.mode)
         mcp.run("stdio")
         return
 
@@ -917,7 +917,7 @@ def main() -> None:
         log.warning("MCP_PUBLIC_HOSTS is empty: requests through a tunnel will be rejected (Host header check).")
     import uvicorn
 
-    log.info("nynja-etsy %s on http://%s:%s/mcp (mode=%s, public hosts=%s)", __version__,
+    log.info("indigorepublica-etsy %s on http://%s:%s/mcp (mode=%s, public hosts=%s)", __version__,
              settings.http_host, settings.http_port, settings.mode, settings.public_hosts)
     uvicorn.run(build_http_app(settings, mcp), host=settings.http_host, port=settings.http_port,
                 log_level="info", proxy_headers=True, forwarded_allow_ips="127.0.0.1")

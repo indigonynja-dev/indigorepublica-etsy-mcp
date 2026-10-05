@@ -1,8 +1,8 @@
 """One-time Etsy OAuth 2.0 (Authorization Code + PKCE) login.
 
-Usage:  uv run nynja-etsy-auth            # opens/prints the consent URL, catches the redirect
-        uv run nynja-etsy-auth --manual   # paste the redirected URL instead of running a listener
-        uv run nynja-etsy-auth --status   # show what's stored
+Usage:  uv run indigorepublica-etsy-auth            # opens/prints the consent URL, catches the redirect
+        uv run indigorepublica-etsy-auth --manual   # paste the redirected URL instead of running a listener
+        uv run indigorepublica-etsy-auth --status   # show what's stored
 """
 
 from __future__ import annotations

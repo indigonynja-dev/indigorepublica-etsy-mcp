@@ -16,8 +16,8 @@ RETRY_STATUSES = {429, 500, 502, 503, 504}
 HINTS = {
     "shared secret": "Set ETSY_SHARED_SECRET in .env (Etsy needs 'keystring:shared_secret' in x-api-key since Feb 2026).",
     "not found or not active": "Your Etsy app key is not active yet. Check etsy.com/developers/your-apps; 'Pending Personal Approval' usually clears in 1-7 days.",
-    "invalid_grant": "The refresh token is expired or revoked. Run `uv run nynja-etsy-auth` again.",
-    "insufficient_scope": "Token lacks a scope this call needs. Add it to ETSY_SCOPES and re-run `uv run nynja-etsy-auth`.",
+    "invalid_grant": "The refresh token is expired or revoked. Run `uv run indigorepublica-etsy-auth` again.",
+    "insufficient_scope": "Token lacks a scope this call needs. Add it to ETSY_SCOPES and re-run `uv run indigorepublica-etsy-auth`.",
 }
 
 
@@ -26,7 +26,7 @@ class EtsyError(Exception):
         self.status, self.message, self.path, self.body = status, message, path, body
         hint = next((h for k, h in HINTS.items() if k in message.lower()), "")
         if not hint and status == 401:
-            hint = "Token rejected. Run `uv run nynja-etsy-auth --status`; if it persists, re-run `uv run nynja-etsy-auth`."
+            hint = "Token rejected. Run `uv run indigorepublica-etsy-auth --status`; if it persists, re-run `uv run indigorepublica-etsy-auth`."
         if not hint and status == 403:
             hint = "Forbidden. The token may lack a scope, or this resource isn't yours."
         if not hint and status == 404:
