@@ -231,6 +231,17 @@ def test_profile_top_tags_capped_at_30(rig):
     assert len(c.profile("rival")["top_tags"]) == 30
 
 
+def test_profile_reads_only_the_latest_snapshot(rig):
+    """Every snapshot holds all of a shop's listings, and daily snapshots pile up: profiling must not parse the old ones."""
+    c, _, db = rig
+    with closing(db._connect()) as con, con:
+        con.execute("INSERT INTO competitors VALUES (11,'Rival','x')")
+        con.execute("INSERT INTO competitor_snapshots VALUES (11, '2026-01-01T00:00:00+00:00', 1, 'unreadable: parsing this would crash')")
+    _store(db, 11, "2026-03-01T00:00:00+00:00", [_l(1, price=5.0), _l(2, price=7.0)])
+    assert c.profile("rival")["listing_count"] == 2
+    assert [s["taken_at"] for s in c._snapshots(11, limit=1)] == ["2026-03-01T00:00:00+00:00"]
+
+
 # ----------------------------------------------------------------------------- migration
 def test_shop_name_migration_on_existing_v1_database(tmp_path):
     path = tmp_path / "old.db"

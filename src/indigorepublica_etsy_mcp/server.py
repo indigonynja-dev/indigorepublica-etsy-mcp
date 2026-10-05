@@ -31,7 +31,7 @@ from .competitors import register_competitor_tools
 from .config import Settings, load_settings
 from .oas import SpecIndex
 from .research import ResearchDB
-from . import seo
+from . import resources, seo
 
 log = logging.getLogger("indigorepublica_etsy_mcp")
 
@@ -61,7 +61,9 @@ Rules of the road:
 - Money comes back as decimals in the shop currency. Timestamps are ISO-8601 UTC.
 - Prefer the specific tools; use etsy_find_endpoint + etsy_api_request only for gaps.
 - Every write to Etsy is recorded in a local append-only log (etsy_write_log).
+- A write error that says OUTCOME UNKNOWN may have been applied and was not retried: read it back (etsy_get_listing) and compare before trying again. Never repeat a create blindly.
 - Market data comes from other tools (e.g. ProfitTree); cache it with research_save_* and reuse it via research_get_* before re-fetching.
+- Read-only resources (etsy://shop/listings, etsy://keywords/{seed}, etsy://competitor/{shop}, etsy://audit/{listing_id}, etsy://writes/recent) expose the cache and the write log; they never write.
 - File uploads read from the server's allowed folders (ETSY_UPLOAD_DIRS) or from https URLs.
 The term 'Etsy' is a trademark of Etsy, Inc. This tool uses the Etsy API but is not endorsed or certified by Etsy, Inc."""
 
@@ -224,14 +226,16 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             raise ToolError(str(e)) from e
 
     research = ResearchDB(settings.research_db)
+    listings_cache = resources.ListingsCache()
 
     class WriteEntry:
         def __init__(self, request: Any) -> None:
             self.request, self.before, self.response = request, None, None
 
     @asynccontextmanager
-    async def wlog(tool: str, listing_id: int | None = None, request: Any = None, dry_run: bool = False):
-        """Record one write attempt (success, rejection or failure) in the append-only write log. Never masks the real error."""
+    async def wlog(tool: str, listing_id: int | None = None, request: Any = None, dry_run: bool = False, only_errors: bool = False):
+        """Record one write attempt (success, rejection or failure) in the append-only write log. Never masks the real error.
+        only_errors=True records refusals and failures only: for a pre-flight check whose success is logged by the write that follows."""
         entry = WriteEntry(request)
         result = "ok"
         try:
@@ -240,14 +244,16 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             result = f"error: {e}"
             raise
         finally:
-            try:
-                tok = etsy.tokens.load() if settings.token_file.exists() else {}
-                secrets = tuple(str(v) for v in (settings.keystring, settings.shared_secret, settings.api_key_header,
-                                                 tok.get("access_token"), tok.get("refresh_token"), settings.auth_token) if v)
-                research.log_write(tool, listing_id, settings.mode, dry_run, entry.before,
-                                   {"request": entry.request, "response": entry.response}, result, secrets)
-            except Exception:  # noqa: BLE001 - logging must never break a tool
-                log.exception("write log failed for %s", tool)
+            listings_cache.invalidate()  # the shop may have changed: the next etsy://shop/listings read must not be stale
+            if not (only_errors and result == "ok"):
+                try:
+                    tok = etsy.tokens.load() if settings.token_file.exists() else {}
+                    secrets = tuple(str(v) for v in (settings.keystring, settings.shared_secret, settings.api_key_header,
+                                                     tok.get("access_token"), tok.get("refresh_token"), settings.auth_token) if v)
+                    research.log_write(tool, listing_id, settings.mode, dry_run, entry.before,
+                                       {"request": entry.request, "response": entry.response}, result, secrets)
+                except Exception:  # noqa: BLE001 - logging must never break a tool
+                    log.exception("write log failed for %s", tool)
 
     async def peek(path: str, keys: list[str] | None = None, shape: Any = None) -> Any:
         """Best-effort read of current state for the log's 'before'. Returns None on any failure."""
@@ -892,13 +898,17 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> Any:
         """Escape hatch: call any Etsy Open API v3 endpoint on this shop. path is relative to /v3/application, e.g. '/shops/{shop_id}/listings' ({shop_id} is filled in).
         Use form for x-www-form-urlencoded bodies (most POST/PATCH), json_body for JSON (inventory). Writes respect ETSY_MCP_MODE; DELETE needs full."""
-        if "://" in path or not path.startswith("/") or ".." in path:
-            raise ToolError("path must be a relative API path like '/shops/{shop_id}/sections'.")
+        def check_path() -> None:
+            if "://" in path or not path.startswith("/") or ".." in path:
+                raise ToolError("path must be a relative API path like '/shops/{shop_id}/sections'.")
+
         if method == "GET":
+            check_path()
             if "{shop_id}" in path:
                 path = path.replace("{shop_id}", await sid())
             return await call(method, path, params=query)
         async with wlog("etsy_api_request", None, {"method": method, "path": path, "query": query, "form": form, "json": json_body}) as w:
+            check_path()  # inside the log scope: a refused write (e.g. an absolute URL) is still recorded
             guard("delete" if method == "DELETE" else "write")
             if "{shop_id}" in path:
                 path = path.replace("{shop_id}", await sid())
@@ -906,7 +916,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             return w.response
 
     seo.register(mcp, research=research, call=call, sid=sid, guard=guard, update_listing=update_listing,
-                 taxonomy_flat=taxonomy_flat, lint=seo_check, write=WRITE)
+                 taxonomy_flat=taxonomy_flat, lint=seo_check, write=WRITE, wlog=wlog)
 
     # ======================================================================= RESEARCH CACHE & WRITE LOG
     def _rows(rows: Any) -> list[dict[str, Any]]:
@@ -949,7 +959,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         """Read the append-only log of writes this server made (newest first): tool, listing_id, server mode, dry_run, before/after, result. Filter by listing_id. Nothing can delete rows."""
         return {"entries": research.read_write_log(limit, listing_id)}
 
-    register_competitor_tools(mcp, etsy, research)
+    competitors = register_competitor_tools(mcp, etsy, research)
+
+    # ======================================================================= RESOURCES (read-only)
+    resources.register(mcp, research=research, competitors=competitors, etsy=etsy, sid=sid, summarize=listing_summary,
+                       cache=listings_cache)
 
     # ======================================================================= PROMPTS
     @mcp.prompt()

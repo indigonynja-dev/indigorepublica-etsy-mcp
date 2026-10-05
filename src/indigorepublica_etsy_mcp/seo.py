@@ -285,6 +285,19 @@ def store_audit(research: ResearchDB, report: dict[str, Any]) -> None:
                     (report["listing_id"], report["score"], json.dumps(report, ensure_ascii=False), now_iso()))
 
 
+def latest_audit(research: ResearchDB, listing_id: int) -> dict[str, Any] | None:
+    """Newest stored audit report for a listing, with when it ran, or None. Read-only."""
+    with closing(_con(research)) as con:
+        row = con.execute("SELECT score, report_json, created_at FROM audits WHERE listing_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                          (listing_id,)).fetchone()
+    if row is None:
+        return None
+    report = json.loads(row["report_json"] or "{}")
+    report.setdefault("listing_id", listing_id)
+    report.setdefault("score", row["score"])
+    return {**report, "audited_at": row["created_at"], "age_days": age_days(row["created_at"])}
+
+
 def _previews(research: ResearchDB) -> sqlite3.Connection:
     return _con(research)  # seo_previews is created by research.py migration v2
 
@@ -478,7 +491,7 @@ def build_diff(before: dict[str, Any], proposal: dict[str, Any]) -> dict[str, An
 def register(mcp: Any, *, research: ResearchDB, call: Callable[..., Awaitable[Any]], sid: Callable[[], Awaitable[str]],
              guard: Callable[[str], None], update_listing: Callable[..., Awaitable[dict[str, Any]]],
              taxonomy_flat: Callable[[], Awaitable[list[dict[str, Any]]]], lint: Callable[..., dict[str, Any]],
-             write: ToolAnnotations) -> None:
+             write: ToolAnnotations, wlog: Callable[..., Any]) -> None:
     """Register seo_audit, seo_tag_gaps, seo_preview_update, seo_apply_update on the server."""
 
     async def best_effort(coro: Awaitable[Any]) -> Any:
@@ -543,12 +556,15 @@ def register(mcp: Any, *, research: ResearchDB, call: Callable[..., Awaitable[An
     @mcp.tool(annotations=write)
     async def seo_apply_update(listing_id: int, preview_id: str) -> dict[str, Any]:
         """Apply a stored seo_preview_update exactly as previewed (nothing else can be written). Refuses unknown, expired, already-applied previews, and previews whose listing changed on Etsy since. Respects ETSY_MCP_MODE and is recorded in the write log."""
-        guard("write")
-        pv = load_preview(research, listing_id, preview_id)
-        current = await call("GET", f"/listings/{listing_id}")
-        drift = [f for f in pv["proposal"] if (current.get(f) or ([] if f == "tags" else "")) != (pv["before"].get(f) or ([] if f == "tags" else ""))]
-        if drift:
-            raise ToolError(f"Listing {listing_id} changed on Etsy since the preview ({', '.join(drift)}). Run seo_preview_update again so you approve the current diff.")
+        # Pre-flight refusals (readonly mode, unknown/expired/applied preview, drift) are logged here; the write itself is logged
+        # by update_listing, so every attempt leaves exactly one write-log row.
+        async with wlog("seo_apply_update", listing_id, {"preview_id": preview_id}, only_errors=True):
+            guard("write")
+            pv = load_preview(research, listing_id, preview_id)
+            current = await call("GET", f"/listings/{listing_id}")
+            drift = [f for f in pv["proposal"] if (current.get(f) or ([] if f == "tags" else "")) != (pv["before"].get(f) or ([] if f == "tags" else ""))]
+            if drift:
+                raise ToolError(f"Listing {listing_id} changed on Etsy since the preview ({', '.join(drift)}). Run seo_preview_update again so you approve the current diff.")
         res = await update_listing("seo_apply_update", listing_id, dict(pv["proposal"]), False)
         mark_applied(research, pv["preview_id"])
         return {"applied": True, "preview_id": pv["preview_id"], "fields": sorted(pv["proposal"]), **res}
