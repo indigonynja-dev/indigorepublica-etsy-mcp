@@ -278,7 +278,7 @@ async def test_tools_registered_and_read_only_flags(env):
     names = {"competitor_add", "competitor_remove", "competitor_list", "competitor_snapshot", "competitor_snapshot_all",
              "competitor_diff", "competitor_profile"}
     assert names <= tools.keys()
-    for n in ("competitor_list", "competitor_diff", "competitor_profile"):
+    for n in ("competitor_list", "competitor_diff"):
         assert tools[n].annotations.read_only_hint is True
     assert not any(tools[n].annotations.destructive_hint for n in names)
 

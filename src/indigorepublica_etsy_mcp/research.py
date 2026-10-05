@@ -11,7 +11,7 @@ import os
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -73,6 +73,9 @@ TABLES = {
     "keywords": "fetched_at", "market_listings": "fetched_at", "competitor_snapshots": "taken_at",
     "audits": "created_at", "write_log": "ts",
 }
+
+# Cache tables that age out under ETSY_CACHE_RETENTION_DAYS (Etsy-sourced data, plus ProfitTree keyword rows).
+PRUNABLE = {"competitor_snapshots": "taken_at", "market_listings": "fetched_at", "keywords": "fetched_at"}
 
 # First name in each tuple is ProfitTree's (keyword_finder / product_finder); the rest are fallbacks.
 KEYWORD_ALIASES = {
@@ -164,6 +167,54 @@ def redact(obj: Any, secrets: tuple[str, ...] = ()) -> Any:
             if sec:
                 obj = obj.replace(sec, REDACTED)
         return BEARER_RE.sub(f"Bearer {REDACTED}", obj)
+    return obj
+
+
+BUYER_REMOVED = "[BUYER_DATA_REMOVED]"
+# Keys that only ever hold buyer personal data (Etsy receipts, transactions, shipping addresses), whatever they sit in.
+_BUYER_KEYS = frozenset({
+    "buyer_name", "buyer_email", "buyer_user_id", "buyer_id", "first_name", "last_name", "email", "phone", "phone_number",
+    "first_line", "second_line", "formatted_address", "address", "address1", "address2", "address_line1", "address_line2",
+    "street", "street_address", "city", "zip", "zipcode", "zip_code", "postal_code", "gift_message", "message_from_buyer",
+    "personalization", "personalisation", "personalization_text", "customization",
+    "ship_to_name", "shipping_address", "billing_address",
+})
+# Generic names that are buyer data only inside a dict that is clearly a buyer/address record (a listing's "state" is not).
+_CONTEXT_KEYS = frozenset({"name", "state", "country", "country_iso", "country_id", "country_name", "region", "province"})
+_ANCHOR_KEYS = frozenset({
+    "first_line", "formatted_address", "zip", "city", "buyer_email", "buyer_user_id", "gift_message", "message_from_buyer",
+    "buyer_name", "ship_to_name", "postal_code",
+})
+EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+")
+
+
+def scrub_buyer_data(obj: Any) -> Any:
+    """Copy of obj with buyer personal data replaced by "[BUYER_DATA_REMOVED]": names, address lines, city/state/zip/country,
+    emails, phone numbers, buyer user ids, gift messages and personalization text. Applied before anything reaches write_log."""
+    if isinstance(obj, dict):
+        anchored = any(str(k).lower() in _ANCHOR_KEYS for k in obj)
+        label = str(obj.get("formatted_name") or obj.get("property_name") or "").lower()
+        personalized = "personali" in label or "customi" in label
+        out = {}
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in _BUYER_KEYS or (anchored and lk in _CONTEXT_KEYS):
+                out[k] = BUYER_REMOVED if v not in (None, "", [], {}) else v
+            elif personalized and lk in ("formatted_value", "value", "values"):
+                out[k] = BUYER_REMOVED
+            else:
+                out[k] = scrub_buyer_data(v)
+        return out
+    if isinstance(obj, (list, tuple, set)):
+        return [scrub_buyer_data(v) for v in obj]
+    if isinstance(obj, str):
+        t = obj.lstrip()
+        if t[:1] in "{[":  # a JSON body that travelled as a string
+            try:
+                return json.dumps(scrub_buyer_data(json.loads(t)), ensure_ascii=False)
+            except ValueError:
+                pass
+        return EMAIL_RE.sub(BUYER_REMOVED, obj)
     return obj
 
 
@@ -306,6 +357,24 @@ class ResearchDB:
         }
         return res
 
+    # ------------------------------------------------------------------ retention
+    def prune(self, retention_days: int = 90, dry_run: bool = False) -> dict[str, Any]:
+        """Delete Etsy-sourced cache rows older than retention_days (competitor_snapshots, market_listings) plus ProfitTree
+        keyword rows. The write log, audits and SEO previews are never touched. dry_run only counts."""
+        if retention_days < 1:
+            raise ValueError("retention_days must be 1 or more")
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=retention_days)).isoformat(timespec="seconds")
+        out: dict[str, Any] = {}
+        with closing(self._connect()) as con, con:
+            for table, col in PRUNABLE.items():
+                n, oldest = con.execute(f"SELECT COUNT(*), MIN({col}) FROM {table} WHERE {col} < ?", (cutoff,)).fetchone()
+                if n and not dry_run:
+                    con.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+                out[table] = {"rows": n, "oldest": oldest}
+        total = sum(v["rows"] for v in out.values())
+        return {"dry_run": dry_run, "retention_days": retention_days, "cutoff": cutoff, "tables": out,
+                "total_rows": total, "deleted": 0 if dry_run else total}
+
     # ------------------------------------------------------------------ stats
     def stats(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -319,7 +388,7 @@ class ResearchDB:
     # ------------------------------------------------------------------ write log
     def log_write(self, tool: str, listing_id: int | None, mode: str, dry_run: bool, before: Any, after: Any, result: str,
                   secrets: tuple[str, ...] = ()) -> int:
-        before, after, result = redact(before, secrets), redact(after, secrets), redact(result or "", secrets)
+        before, after, result = (scrub_buyer_data(redact(x, secrets)) for x in (before, after, result or ""))
         with closing(self._connect()) as con, con:
             cur = con.execute(
                 "INSERT INTO write_log (ts, tool, listing_id, mode, dry_run, before_json, after_json, result) VALUES (?,?,?,?,?,?,?,?)",

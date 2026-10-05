@@ -3,7 +3,7 @@
 MCP server that gives Claude full control of **your own** Etsy shop: listings, digital-download files,
 images, orders, sales, fees, reviews, plus a local research cache, competitor tracking and SEO audits. Runs over **stdio**
 for Claude Code and **Streamable HTTP** for Claude.ai (web, desktop, mobile) behind an HTTPS tunnel.
-52 tools, 3 prompts, 5 resources, offline test suite.
+53 tools, 3 prompts, 5 resources, offline test suite.
 
 > The term 'Etsy' is a trademark of Etsy, Inc. This application uses the Etsy API but is not endorsed or certified by Etsy, Inc.
 
@@ -36,7 +36,7 @@ uv run indigorepublica-etsy-mcp --transport http     # or the systemd unit in de
 #   Request header: Authorization = Bearer <MCP_AUTH_TOKEN>
 ```
 
-## Tools (52)
+## Tools (53)
 
 Tools marked **write** change something on Etsy and are refused in `readonly` mode; **delete** tools are refused unless
 `ETSY_MCP_MODE=full`. Every other tool only reads (see [Safety model](#safety-model)).
@@ -94,6 +94,7 @@ Nothing here calls Etsy, so all of it works in every server mode.
 | `research_get_keywords` | Cached keyword rows (best `niche_score` first) with `age_days`, a stale flag and a fresh / partial / stale / missing status. |
 | `research_get_market` | Cached market listings for a keyword, with an average-price and estimated-revenue summary. |
 | `research_cache_stats` | Row counts and oldest/newest timestamps for every cache table, plus the database path and schema version. |
+| `research_prune` | Preview (`dry_run=true`, the default) or run retention pruning: deletes `competitor_snapshots`, `market_listings` and `keywords` rows older than `ETSY_CACHE_RETENTION_DAYS` (default 90). Never touches the write log. |
 | `etsy_write_log` | Read the append-only log of writes (newest first), including blocked and failed attempts. |
 
 ### Competitor tracking (public Etsy data only)
@@ -105,8 +106,8 @@ Other shops are read through Etsy's public API endpoints with your API key. Noth
 | `competitor_add` / `competitor_remove` / `competitor_list` | Maintain the watchlist (by shop name or numeric id). Removing keeps the stored snapshots. |
 | `competitor_snapshot` | Fetch all active listings of a watched shop (title, tags, price, image count, dates) and store a snapshot. |
 | `competitor_snapshot_all` | Snapshot every watched shop; one failing shop does not stop the rest. |
-| `competitor_diff` | What changed between snapshots: new/removed listings, title, tag, price and image-count changes. |
-| `competitor_profile` | From the latest snapshot: price median/quartiles, top 30 tags, 10 newest listings, average listing age. |
+| `competitor_diff` | What changed between snapshots: new/removed listings, title, tag, price and image-count changes. Shows the date and age of both snapshots. |
+| `competitor_profile` | From the latest snapshot: price median/quartiles, top 30 tags, 10 newest listings, average listing age. Refreshes the snapshot first if it is older than 6 hours (not in `readonly` mode); if the refresh fails the old data comes back labelled with its age. |
 
 ### SEO audit and safe edits
 
@@ -129,7 +130,7 @@ no Etsy write, no database write, no write-log row. They work in every server mo
 |---|---|---|
 | `etsy://shop/listings` | Your active listings, newest update first: `listing_id`, `title`, `price`, `currency`, `state`, `updated`. Up to 500; `truncated` says if there are more. | One Etsy read, cached in memory for 5 minutes and dropped whenever this server writes (`cached` / `cache_age_seconds` say which you got). |
 | `etsy://keywords/{seed}` | Cached keyword rows containing the seed, with `age_days`, `stale` (older than 7 days) and a `status` of fresh / partial / stale / missing. | Research cache. |
-| `etsy://competitor/{shop}` | Latest competitor profile (price quartiles, top tags, newest listings, average age) plus `snapshot_age_days`. `{shop}` is the shop name or id. | Latest stored snapshot. |
+| `etsy://competitor/{shop}` | Latest competitor profile (price quartiles, top tags, newest listings, average age) plus `snapshot_age` (taken-at time, age, STALE after 6 hours) at the top. `{shop}` is the shop name or id. | Latest stored snapshot. |
 | `etsy://audit/{listing_id}` | The most recent stored `seo_audit` report for a listing, with `audited_at` and `age_days`. | Research cache. |
 | `etsy://writes/recent` | The last 50 write-log rows, newest first. | Write log. |
 
@@ -153,7 +154,7 @@ so a scheduler can alert. For example, daily at 06:30:
 30 6 * * *  cd ~/mcp-servers/indigorepublica-etsy-mcp && ~/.local/bin/uv run indigorepublica-etsy-snapshot >> ~/.indigorepublica-etsy-mcp/snapshot.log 2>&1
 ```
 
-Add shops first with `competitor_add`. Snapshots accumulate (nothing deletes them); `competitor_diff` compares the latest one with the
+Add shops first with `competitor_add`. Snapshots accumulate until retention pruning removes those older than `ETSY_CACHE_RETENTION_DAYS` (the CLI prunes at the end of every run, and its report has a `pruned` section); `competitor_diff` compares the latest one with the
 previous one, or with the newest one taken on or before a date you give.
 
 ## Cache location
@@ -164,6 +165,7 @@ Everything the server remembers lives in one SQLite file (standard-library `sqli
 |---|---|
 | Default path | `~/.indigorepublica-etsy-mcp/research.db` |
 | Override | `ETSY_RESEARCH_DB=/path/to/research.db` |
+| Retention | `ETSY_CACHE_RETENTION_DAYS=90` (default): older snapshots, market listings and keyword rows are pruned on start |
 | Created | chmod 600; the parent folder is created if missing |
 | Tables | `keywords`, `market_listings`, `competitors`, `competitor_snapshots`, `audits`, `seo_previews`, `write_log` |
 | Upgrades | Versioned with `PRAGMA user_version` (currently 3); older files are migrated in place on start, a file from a newer server is refused |
@@ -171,6 +173,22 @@ Everything the server remembers lives in one SQLite file (standard-library `sqli
 
 The same folder holds `tokens.json` (OAuth tokens) and `etsy-oas.json` (a cached copy of Etsy's OpenAPI spec). To reset the cache,
 stop the server and delete `research.db`; that also deletes the write log, so copy it first if you want to keep the history.
+
+## Etsy API Terms compliance
+
+This is a **single-shop, private tool**: it manages your own IndigoRepublica shop with your own Etsy API key, and it is not a
+public or multi-seller service. The data it keeps is limited accordingly.
+
+- **Retention.** Etsy-sourced cache data (`competitor_snapshots`, `market_listings`) and ProfitTree keyword rows older than
+  `ETSY_CACHE_RETENTION_DAYS` (default 90) are deleted automatically on every server start and at the end of every snapshot CLI run.
+  `research_prune(dry_run=true)` previews what would go; `dry_run=false` runs it now.
+- **Freshness.** `competitor_profile` re-snapshots a competitor first when the latest snapshot is older than 6 hours (skipped in
+  `readonly` mode, throttled and 429-backed-off like every Etsy call). If the refresh fails, the old data is returned clearly labelled
+  with its age. `competitor_diff` shows the dates of both snapshots, and `etsy://competitor/{shop}` leads with the snapshot age.
+- **Buyer data.** Before anything is stored in the write log, buyer personal data is replaced with `[BUYER_DATA_REMOVED]` in both
+  requests and responses: names, address lines, city/state/zip/country, emails, phone numbers, buyer user ids, gift messages and
+  personalization text. The log keeps the tool, ids, mode and outcome, which is enough to audit what was done.
+- **Data sources.** Etsy Open API v3 only (no scraping). Market data comes from ProfitTree, which Claude calls separately.
 
 ## Safety model
 
@@ -251,5 +269,5 @@ uv sync --all-extras
 uv run --all-extras pytest -q
 ```
 
-No network, no real keys: Etsy is a mocked HTTP transport and the cache is a temp file. A test asserts the registered tool count (52)
-and that the "52 tools, 3 prompts, 5 resources" line at the top of this README matches the server, so adding a tool means updating both.
+No network, no real keys: Etsy is a mocked HTTP transport and the cache is a temp file. A test asserts the registered tool count (53)
+and that the "53 tools, 3 prompts, 5 resources" line at the top of this README matches the server, so adding a tool means updating both.

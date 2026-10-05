@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any
@@ -24,13 +25,15 @@ from mcp.types import ToolAnnotations
 
 from .client import EtsyClient, EtsyError
 from .config import Settings, load_settings
-from .research import ResearchDB, _loads, now_iso
+from .research import ResearchDB, _loads, age_days, now_iso
 
 log = logging.getLogger("indigorepublica_etsy_mcp.competitors")
 
 MAX_LISTINGS = 20_000  # safety cap per shop snapshot
 TOP_TAGS = 30
 NEWEST = 10
+REFRESH_AFTER_HOURS = 6  # competitor_profile re-snapshots when the latest snapshot is older than this
+REFRESH_RETRY_SECONDS = 300  # after a failed refresh, serve the old data for this long instead of hammering Etsy
 PRICE_EPS = 0.005
 
 LOCAL = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -129,8 +132,9 @@ def diff_snapshots(old: list[dict[str, Any]], new: list[dict[str, Any]], max_det
 class Competitors:
     """Watchlist + snapshot store on top of the research DB, fetching through the existing EtsyClient."""
 
-    def __init__(self, etsy: EtsyClient, db: ResearchDB):
-        self.etsy, self.db = etsy, db
+    def __init__(self, etsy: EtsyClient, db: ResearchDB, mode: str = "safe"):
+        self.etsy, self.db, self.mode = etsy, db, mode
+        self._refresh_failed_at: dict[int, float] = {}
 
     # ------------------------------------------------------------- Etsy (public endpoints, API key only)
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -256,7 +260,10 @@ class Competitors:
                 raise CompetitorError("Only one snapshot exists; take another later to compare.")
             base = snaps[1]
         res = diff_snapshots(base["listings"], latest["listings"], max_details)
+        older, newer = _snapshot_date(base["taken_at"]), _snapshot_date(latest["taken_at"])
         return {"shop_id": e["shop_id"], "shop_name": e["shop_name"], "from": base["taken_at"], "to": latest["taken_at"],
+                "snapshot_dates": {"older": older, "newer": newer},
+                "comparison": f"Older snapshot {older['taken_at']} ({older['age']}) vs newer snapshot {newer['taken_at']} ({newer['age']}).",
                 **res,
                 "note": "'removed' means no longer active (sold out, deactivated, expired or deleted); Etsy's public API doesn't say which."}
 
@@ -277,6 +284,7 @@ class Competitors:
         ages = [(taken - datetime.fromisoformat(l["created"])).total_seconds() / 86400 for l in ls if l.get("created")]
         newest = sorted((l for l in ls if l.get("created")), key=lambda l: l["created"], reverse=True)[:NEWEST]
         return {
+            **_freshness_fields(snap["taken_at"]),
             "shop_id": e["shop_id"], "shop_name": e["shop_name"], "snapshot_taken_at": snap["taken_at"],
             "listing_count": len(ls),
             "price": {"median": percentile(prices, 0.5), "p25": percentile(prices, 0.25), "p75": percentile(prices, 0.75),
@@ -285,6 +293,46 @@ class Competitors:
             "newest_listings": [{k: l.get(k) for k in ("listing_id", "title", "price", "created", "url")} for l in newest],
             "avg_listing_age_days": round(sum(ages) / len(ages), 1) if ages else None,
         }
+
+    async def profile_fresh(self, shop: str | int) -> dict[str, Any]:
+        """Profile of the latest snapshot, re-snapshotting first when it is older than REFRESH_AFTER_HOURS. A refresh that is
+        skipped (readonly mode, recent failure) or fails returns the old data, clearly labelled with its age."""
+        e = self.resolve(shop)
+        snaps = self._snapshots(e["shop_id"], limit=1)
+        if not snaps:
+            raise CompetitorError(f"No snapshots for {e['shop_name'] or e['shop_id']} yet. Run competitor_snapshot first.")
+        refresh: dict[str, Any] = {"attempted": False, "refreshed": False}
+        if _freshness_fields(snaps[0]["taken_at"])["stale"]:
+            if self.mode == "readonly":
+                refresh["note"] = "Not refreshed: server is in readonly mode (ETSY_MCP_MODE=readonly), so no new snapshot is stored."
+            elif time.monotonic() - self._refresh_failed_at.get(e["shop_id"], -1e9) < REFRESH_RETRY_SECONDS:
+                refresh["note"] = "Not refreshed: a refresh failed a moment ago; not retrying yet."
+            else:
+                refresh["attempted"] = True
+                try:
+                    await self.snapshot(e["shop_id"])  # public API through the throttled client (429 backoff built in)
+                    refresh["refreshed"] = True
+                except CompetitorError as err:
+                    self._refresh_failed_at[e["shop_id"]] = time.monotonic()
+                    refresh["error"] = str(err)
+                    refresh["note"] = "Refresh failed; showing the OLD snapshot (see snapshot_age)."
+        return {**self.profile(e["shop_id"]), "refresh": refresh}
+
+
+def _age_label(hours: float) -> str:
+    return f"{round(hours)}h old" if hours < 48 else f"{round(hours / 24)}d old"
+
+
+def _snapshot_date(taken_at: str) -> dict[str, Any]:
+    hours = round(age_days(taken_at) * 24, 1)
+    return {"taken_at": taken_at, "date": taken_at[:10], "age_hours": hours, "age": _age_label(hours)}
+
+
+def _freshness_fields(taken_at: str) -> dict[str, Any]:
+    hours = round(age_days(taken_at) * 24, 1)
+    stale = hours > REFRESH_AFTER_HOURS
+    return {"snapshot_age": f"Snapshot taken {taken_at} ({_age_label(hours)})" + (" - STALE, older than 6 hours" if stale else ""),
+            "snapshot_age_hours": hours, "snapshot_age_days": round(hours / 24, 2), "stale": stale}
 
 
 def _parse_since(value: str) -> datetime:
@@ -301,8 +349,8 @@ def _parse_since(value: str) -> datetime:
 
 
 # ----------------------------------------------------------------------------- MCP registration
-def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: ResearchDB) -> Competitors:
-    comp = Competitors(etsy, research)
+def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: ResearchDB, mode: str = "safe") -> Competitors:
+    comp = Competitors(etsy, research, mode)
 
     def wrap(fn):
         async def run(*a, **kw):
@@ -343,10 +391,10 @@ def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: Resear
         """What changed in a competitor's shop: compares the latest two snapshots (or the latest vs the newest one taken on/before `since`, YYYY-MM-DD or ISO). Summary counts first, then details: new/removed listings, title changes, tags added/removed, price changes (amount and %), image count changes."""
         return await wrap(comp.diff)(shop, since, max_details)
 
-    @mcp.tool(annotations=LOCAL)
+    @mcp.tool(annotations=FETCH)
     async def competitor_profile(shop: str) -> dict[str, Any]:
-        """Profile from a shop's latest snapshot: listing count, price median/p25/p75, top 30 tags with counts, 10 newest listings, average listing age in days."""
-        return await wrap(comp.profile)(shop)
+        """Profile from a shop's latest snapshot: listing count, price median/p25/p75, top 30 tags with counts, 10 newest listings, average listing age in days. If that snapshot is older than 6 hours it is refreshed first from Etsy's public API (skipped in readonly mode); if the refresh fails the old data is returned, labelled with its age (snapshot_age, refresh)."""
+        return await wrap(comp.profile_fresh)(shop)
 
     return comp
 
@@ -354,10 +402,17 @@ def register_competitor_tools(mcp: MCPServer, etsy: EtsyClient, research: Resear
 # ----------------------------------------------------------------------------- CLI for schedulers
 async def _run_all(settings: Settings, delay: float) -> dict[str, Any]:
     etsy = EtsyClient(settings)
+    db = ResearchDB(settings.research_db)
     try:
-        return await Competitors(etsy, ResearchDB(settings.research_db)).snapshot_all(delay)
+        result = await Competitors(etsy, db, settings.mode).snapshot_all(delay)
     finally:
         await etsy.aclose()
+    try:  # retention: age out old Etsy-sourced cache rows at the end of every run
+        result["pruned"] = db.prune(settings.cache_retention_days)
+    except Exception as e:  # noqa: BLE001 - pruning must not fail the snapshot run
+        log.warning("cache pruning failed: %s", e)
+        result["pruned"] = {"error": str(e)}
+    return result
 
 
 def main(argv: list[str] | None = None) -> None:

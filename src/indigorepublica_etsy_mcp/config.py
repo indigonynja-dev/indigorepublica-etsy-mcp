@@ -72,6 +72,7 @@ class Settings:
     oas_url: str = OAS_URL
     max_upload_mb: int = 25
     research_db: Path = field(default_factory=lambda: _research_db_path())
+    cache_retention_days: int = 90
 
     @property
     def api_key_header(self) -> str:
@@ -94,6 +95,12 @@ def load_settings() -> Settings:
     mode = (env("ETSY_MCP_MODE") or "safe").strip().lower()
     if mode not in MODES:
         raise RuntimeError(f"ETSY_MCP_MODE must be one of {MODES}, got {mode!r}")
+    try:
+        retention = int(env("ETSY_CACHE_RETENTION_DAYS") or 90)
+    except ValueError:
+        retention = 0
+    if retention < 1:
+        raise RuntimeError("ETSY_CACHE_RETENTION_DAYS must be a whole number of days, 1 or more (default 90).")
     return Settings(
         keystring=(env("ETSY_KEYSTRING") or "").strip(),
         shared_secret=(env("ETSY_SHARED_SECRET") or "").strip(),
@@ -111,4 +118,5 @@ def load_settings() -> Settings:
         oas_url=env("ETSY_OAS_URL") or OAS_URL,
         max_upload_mb=int(env("ETSY_MAX_UPLOAD_MB") or 25),
         research_db=_research_db_path(),
+        cache_retention_days=retention,
     )
