@@ -133,8 +133,20 @@ async def test_digital_listing_from_manifest(env):
     create = next(c for c in fake.calls if c[0] == "POST" and c[1].endswith("/listings"))
     form = parse_qs(create[2].decode())
     assert form["type"] == ["download"] and form["who_made"] == ["i_did"] and form["is_supply"] == ["false"]
+    assert form["when_made"] == ["2020_2026"]
     assert form["tags"] == ["budget spreadsheet,budget planner,monthly budget"]
     assert not any(c[0] == "PATCH" for c in fake.calls), "must not publish by default"
+
+
+async def test_digital_listing_made_fields_overridable(env):
+    s, fake, products = env
+    server = build_server(s, transport=httpx.MockTransport(fake))
+    args = {"manifest_path": str(products / "listing.json"), "who_made": "collective", "when_made": "2010_2019", "is_supply": True}
+    r = await call(server, "etsy_create_digital_listing", args)
+    assert not r.is_error, r.content
+    create = next(c for c in fake.calls if c[0] == "POST" and c[1].endswith("/listings"))
+    form = parse_qs(create[2].decode())
+    assert form["who_made"] == ["collective"] and form["when_made"] == ["2010_2019"] and form["is_supply"] == ["true"]
 
 
 async def test_publish_requires_fee_confirmation(env):
