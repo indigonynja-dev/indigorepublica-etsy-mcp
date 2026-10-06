@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Fix: `etsy_create_digital_listing` (and `etsy_create_draft_listing`) defaulted `when_made` to `made_to_order`, which turns off instant-delivery expectations for finished downloads. The default is now the current Etsy range `2020_2026`. `who_made` (`i_did`), `when_made` and `is_supply` (`false`) are always sent together, and all three can be overridden via tool args or the manifest (args win).
 - Write retries tightened (`client.py`): a write (POST/PUT/PATCH/DELETE) is re-sent only on a 429 or when the connection could not be made (connect error or timeout, pool timeout), because then Etsy certainly did not act on it. A 5xx, a read/write timeout or a dropped connection is attempted once and raised as `OUTCOME UNKNOWN: ... may or may not have been applied ... check the listing before retrying`, which also lands in the write log. Reads (GET) retry exactly as before. A 401 still triggers one token refresh and re-send (Etsy refused the request before acting on it).
 - Read-only MCP resources (`resources.py`): `etsy://shop/listings` (your active listings; one Etsy read cached 5 minutes in memory and dropped on every write), `etsy://keywords/{seed}`, `etsy://competitor/{shop}`, `etsy://audit/{listing_id}` and `etsy://writes/recent`. They never write; missing data returns a message naming the tool to run first.
 - CI (`.github/workflows/tests.yml`): the offline suite on every push and pull request, Python 3.11, no secrets.

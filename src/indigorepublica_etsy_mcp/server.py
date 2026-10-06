@@ -42,6 +42,9 @@ DELETE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent
 
 LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
+# Etsy's current "made in" range; made_to_order would switch off instant-delivery expectations for downloads.
+DEFAULT_WHEN_MADE = "2020_2026"
+
 LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
 UPDATABLE_LISTING_FIELDS = {
     "title", "description", "price", "quantity", "tags", "materials", "taxonomy_id", "shop_section_id",
@@ -424,7 +427,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         quantity: int = 999,
         type: Literal["download", "physical", "both"] = "download",
         who_made: Literal["i_did", "someone_else", "collective"] = "i_did",
-        when_made: str = "made_to_order",
+        when_made: str = DEFAULT_WHEN_MADE,
         is_supply: bool = False,
         tags: list[str] | None = None,
         materials: list[str] | None = None,
@@ -433,7 +436,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         readiness_state_id: int | None = None,
         extra_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a DRAFT listing (no fee until published). Defaults suit digital downloads: type=download, who_made=i_did, when_made=made_to_order, quantity=999.
+        """Create a DRAFT listing (no fee until published). Defaults suit digital downloads: type=download, who_made=i_did, when_made=2020_2026 (made_to_order would disable instant-delivery expectations), quantity=999.
         Physical items also need shipping_profile_id (and readiness_state_id). Find taxonomy_id with etsy_search_taxonomy. Up to 13 tags, 20 chars each."""
         body: dict[str, Any] = {
             "title": title, "description": description, "price": price, "quantity": quantity,
@@ -599,6 +602,9 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         tags: list[str] | None = None,
         materials: list[str] | None = None,
         shop_section_id: int | None = None,
+        who_made: Literal["i_did", "someone_else", "collective"] | None = None,
+        when_made: str | None = None,
+        is_supply: bool | None = None,
         image_paths: list[str] | None = None,
         image_urls: list[str] | None = None,
         file_paths: list[str] | None = None,
@@ -608,20 +614,21 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     ) -> dict[str, Any]:
         """One call: create a digital-download draft, upload images in order (first = primary), attach the files, optionally publish.
         Easiest with manifest_path -> a listing.json inside ETSY_UPLOAD_DIRS (paths in it resolve relative to its folder). Explicit args override the manifest.
+        who_made/when_made/is_supply are always sent together (Etsy rejects them separately); defaults i_did / current range / false, overridable via args or manifest.
         Leaves the listing as a draft unless publish=true AND confirm_publish_fee=true. Partial failures are reported, not hidden."""
         # The sub-calls below each write their own log entries; this one is the summary.
         async with wlog("etsy_create_digital_listing", None, {"manifest_path": manifest_path, "title": title, "publish": publish}) as w:
             guard("write")
             report = await _create_digital_listing(
                 manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
-                image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee)
+                who_made, when_made, is_supply, image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee)
             w.response = report
             lid = report.get("listing_id")
             w.request["listing_id"] = lid
             return report
 
     async def _create_digital_listing(manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
-                                      image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee) -> dict[str, Any]:
+                                      who_made, when_made, is_supply, image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee) -> dict[str, Any]:
         m: dict[str, Any] = {}
         base: Path | None = None
         if manifest_path:
@@ -656,8 +663,10 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
 
         created = await etsy_create_draft_listing(
             title=title_, description=desc_, price=float(price_), taxonomy_id=int(tax_),
-            quantity=int(m.get("quantity", 999)), type="download", who_made=m.get("who_made", "i_did"),
-            when_made=m.get("when_made", "made_to_order"), tags=pick("tags", tags), materials=pick("materials", materials),
+            quantity=int(m.get("quantity", 999)), type="download",
+            who_made=who_made or m.get("who_made") or "i_did",
+            when_made=when_made or m.get("when_made") or DEFAULT_WHEN_MADE,
+            is_supply=bool(m.get("is_supply", False)) if is_supply is None else is_supply, tags=pick("tags", tags), materials=pick("materials", materials),
             shop_section_id=pick("shop_section_id", shop_section_id), extra_fields=m.get("extra_fields"),
         )
         lid = created["listing"]["listing_id"]
