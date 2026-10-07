@@ -44,7 +44,7 @@ async def test_handshake_advertises_tools_prompts_and_resources(env):
         names = {t.name for t in (await c.list_tools()).tools}
         listed = {str(r.uri) for r in (await c.list_resources()).resources}
         listed |= {t.uri_template for t in (await c.list_resource_templates()).resource_templates}
-    assert NEW_TOOLS <= names and len(names - NEW_TOOLS) == 35, "35 original tools + the 18 newer ones"
+    assert NEW_TOOLS <= names and len(names - NEW_TOOLS) == 36, "35 original tools + etsy_upload_listing_video + the 18 newer ones"
     assert listed == RESOURCES
 
 
@@ -186,7 +186,7 @@ async def test_real_stdio_process_handshake_tools_and_resources(tmp_path):
         async with Client(stdio_client(params, errlog=stderr), read_timeout_seconds=60) as c:
             assert c.server_info.name == "indigorepublica-etsy"
             names = {t.name for t in (await c.list_tools()).tools}
-            assert len(names) == 53 and NEW_TOOLS <= names
+            assert len(names) == 54 and NEW_TOOLS <= names
             assert {str(r.uri) for r in (await c.list_resources()).resources} == {"etsy://shop/listings", "etsy://writes/recent"}
             kw = await read(c, "etsy://keywords/budget")
             assert kw["count"] == 1 and kw["rows"][0]["searches"] == 12000
@@ -197,4 +197,4 @@ async def test_real_stdio_process_handshake_tools_and_resources(tmp_path):
             # a tool that needs credentials fails cleanly (no key configured, no network attempted) and the server keeps serving
             assert (await c.call_tool("etsy_whoami", {})).is_error
             assert (await c.call_tool("etsy_seo_check", {"title": "Monthly Budget Planner Spreadsheet Template"})).structured_content["ok"] is True
-            assert len((await c.list_tools()).tools) == 53
+            assert len((await c.list_tools()).tools) == 54

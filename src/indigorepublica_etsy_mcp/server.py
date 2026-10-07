@@ -43,6 +43,11 @@ DELETE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent
 LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
 LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
+# Etsy's "when made" bucket for a finished item made this decade. Etsy renames it as years pass; if createDraftListing
+# starts rejecting it, update it here (the API error lists the valid values).
+WHEN_MADE_DIGITAL = "2020_2026"
+VIDEO_MAX_MB = 100  # Etsy's listing-video limit
+
 UPDATABLE_LISTING_FIELDS = {
     "title", "description", "price", "quantity", "tags", "materials", "taxonomy_id", "shop_section_id",
     "who_made", "when_made", "is_supply", "type", "should_auto_renew", "is_taxable", "shipping_profile_id",
@@ -293,14 +298,16 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             return Path(file_path).name
         return (Path(httpx.URL(file_url).path).name or None) if file_url else None
 
-    async def load_blob(file_path: str | None, file_url: str | None, file_base64: str | None, filename: str | None) -> tuple[str, bytes, str]:
-        cap = settings.max_upload_mb * 1024 * 1024
+    async def load_blob(file_path: str | None, file_url: str | None, file_base64: str | None, filename: str | None,
+                        cap_mb: int | None = None) -> tuple[str, bytes, str]:
+        limit_mb = cap_mb or settings.max_upload_mb
+        cap = limit_mb * 1024 * 1024
         if sum(x is not None and x != "" for x in (file_path, file_url, file_base64)) != 1:
             raise ToolError("Provide exactly one of file_path, file_url, file_base64.")
         if file_path:
             p = allowed_path(file_path)
             if p.stat().st_size > cap:
-                raise ToolError(f"{p.name} is over {settings.max_upload_mb} MB.")
+                raise ToolError(f"{p.name} is over {limit_mb} MB.")
             data, name = p.read_bytes(), filename or p.name
         elif file_url:
             if not file_url.lower().startswith("https://"):
@@ -311,7 +318,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
                     raise ToolError(f"Download failed ({r.status_code}) for {file_url}")
                 data = r.content
             if len(data) > cap:
-                raise ToolError(f"Downloaded file is over {settings.max_upload_mb} MB.")
+                raise ToolError(f"Downloaded file is over {limit_mb} MB.")
             name = filename or Path(httpx.URL(file_url).path).name or "upload.bin"
         else:
             if not filename:
@@ -424,7 +431,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         quantity: int = 999,
         type: Literal["download", "physical", "both"] = "download",
         who_made: Literal["i_did", "someone_else", "collective"] = "i_did",
-        when_made: str = "made_to_order",
+        when_made: str = WHEN_MADE_DIGITAL,
         is_supply: bool = False,
         tags: list[str] | None = None,
         materials: list[str] | None = None,
@@ -433,7 +440,7 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         readiness_state_id: int | None = None,
         extra_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a DRAFT listing (no fee until published). Defaults suit digital downloads: type=download, who_made=i_did, when_made=made_to_order, quantity=999.
+        """Create a DRAFT listing (no fee until published). Defaults suit digital downloads: type=download, who_made=i_did, when_made=2020_2026 (a finished item; pass made_to_order only if you make it after purchase), quantity=999.
         Physical items also need shipping_profile_id (and readiness_state_id). Find taxonomy_id with etsy_search_taxonomy. Up to 13 tags, 20 chars each."""
         body: dict[str, Any] = {
             "title": title, "description": description, "price": price, "quantity": quantity,
@@ -531,6 +538,30 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/images/{listing_image_id}")
             return w.response
 
+    # ---- video
+    @mcp.tool(annotations=WRITE)
+    async def etsy_upload_listing_video(
+        listing_id: int,
+        file_path: str | None = None,
+        file_url: str | None = None,
+        file_base64: str | None = None,
+        filename: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a listing video from ONE source: file_path (inside ETSY_UPLOAD_DIRS), file_url (https) or file_base64 (+filename).
+        MP4 or MOV, 5-15 seconds, up to 100 MB; Etsy removes the sound. It plays when shoppers hover the listing in search."""
+        req = {"filename": _blob_name(file_path, file_url, filename), "bytes": None, "mime": None}  # never log content/paths/URLs
+        async with wlog("etsy_upload_listing_video", listing_id, req) as w:
+            guard("write")
+            fname, data, mime = await load_blob(file_path, file_url, file_base64, filename, cap_mb=max(VIDEO_MAX_MB, settings.max_upload_mb))
+            if not mime.startswith("video/"):
+                raise ToolError(f"{fname} doesn't look like a video ({mime}). Upload an MP4 or MOV file.")
+            req.update(filename=fname, bytes=len(data), mime=mime)
+            res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/videos",
+                             form={"name": name or fname}, files={"video": (fname, data, mime)})
+            w.response = out = {"video_id": res.get("video_id"), "state": res.get("video_state"), "url": res.get("video_url")}
+            return out
+
     # ---- digital files
     @mcp.tool(annotations=RO)
     async def etsy_list_listing_files(listing_id: int) -> dict[str, Any]:
@@ -603,10 +634,13 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         image_urls: list[str] | None = None,
         file_paths: list[str] | None = None,
         file_urls: list[str] | None = None,
+        video_path: str | None = None,
+        video_url: str | None = None,
         publish: bool = False,
         confirm_publish_fee: bool = False,
     ) -> dict[str, Any]:
-        """One call: create a digital-download draft, upload images in order (first = primary), attach the files, optionally publish.
+        """One call: create a digital-download draft, upload images in order (first = primary), attach the files and an optional
+        video (video_path/video_url, or "video" in the manifest), optionally publish.
         Easiest with manifest_path -> a listing.json inside ETSY_UPLOAD_DIRS (paths in it resolve relative to its folder). Explicit args override the manifest.
         Leaves the listing as a draft unless publish=true AND confirm_publish_fee=true. Partial failures are reported, not hidden."""
         # The sub-calls below each write their own log entries; this one is the summary.
@@ -614,14 +648,15 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             guard("write")
             report = await _create_digital_listing(
                 manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
-                image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee)
+                image_paths, image_urls, file_paths, file_urls, video_path, video_url, publish, confirm_publish_fee)
             w.response = report
             lid = report.get("listing_id")
             w.request["listing_id"] = lid
             return report
 
     async def _create_digital_listing(manifest_path, title, description, price, taxonomy_id, tags, materials, shop_section_id,
-                                      image_paths, image_urls, file_paths, file_urls, publish, confirm_publish_fee) -> dict[str, Any]:
+                                      image_paths, image_urls, file_paths, file_urls, video_path, video_url, publish,
+                                      confirm_publish_fee) -> dict[str, Any]:
         m: dict[str, Any] = {}
         base: Path | None = None
         if manifest_path:
@@ -646,8 +681,10 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         files = rel(file_paths if file_paths is not None else m.get("files"))
         img_urls = image_urls if image_urls is not None else m.get("image_urls", [])
         f_urls = file_urls if file_urls is not None else m.get("file_urls", [])
+        vid = rel([video_path if video_path is not None else m["video"]])[0] if (video_path or m.get("video")) else None
+        vid_url = video_url if video_url is not None else m.get("video_url")
         # Validate local paths up front so we don't leave a half-built draft for a typo.
-        for p in imgs + files:
+        for p in imgs + files + ([vid] if vid else []):
             allowed_path(p)
         if not (imgs or img_urls):
             raise ToolError("At least one image is required (Etsy won't publish without one).")
@@ -657,12 +694,12 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         created = await etsy_create_draft_listing(
             title=title_, description=desc_, price=float(price_), taxonomy_id=int(tax_),
             quantity=int(m.get("quantity", 999)), type="download", who_made=m.get("who_made", "i_did"),
-            when_made=m.get("when_made", "made_to_order"), tags=pick("tags", tags), materials=pick("materials", materials),
+            when_made=m.get("when_made", WHEN_MADE_DIGITAL), tags=pick("tags", tags), materials=pick("materials", materials),
             shop_section_id=pick("shop_section_id", shop_section_id), extra_fields=m.get("extra_fields"),
         )
         lid = created["listing"]["listing_id"]
         report: dict[str, Any] = {"listing_id": lid, "url": created["listing"].get("url"), "state": "draft",
-                                  "seo_warnings": created["seo_warnings"], "images": [], "files": [], "errors": []}
+                                  "seo_warnings": created["seo_warnings"], "images": [], "files": [], "video": None, "errors": []}
         rank = 1
         for p in imgs:
             try:
@@ -684,6 +721,11 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
                 report["files"].append(await etsy_upload_listing_file(lid, file_url=u, rank=i))
             except ToolError as e:
                 report["errors"].append(f"file {u}: {e}")
+        if vid or vid_url:
+            try:
+                report["video"] = await (etsy_upload_listing_video(lid, file_path=vid) if vid else etsy_upload_listing_video(lid, file_url=vid_url))
+            except ToolError as e:
+                report["errors"].append(f"video {vid or vid_url}: {e}")
         if publish:
             if report["errors"]:
                 report["publish"] = "skipped: fix upload errors first"

@@ -3,7 +3,7 @@
 MCP server that gives Claude full control of **your own** Etsy shop: listings, digital-download files,
 images, orders, sales, fees, reviews, plus a local research cache, competitor tracking and SEO audits. Runs over **stdio**
 for Claude Code and **Streamable HTTP** for Claude.ai (web, desktop, mobile) behind an HTTPS tunnel.
-53 tools, 3 prompts, 5 resources, offline test suite.
+54 tools, 3 prompts, 5 resources, offline test suite.
 
 > The term 'Etsy' is a trademark of Etsy, Inc. This application uses the Etsy API but is not endorsed or certified by Etsy, Inc.
 
@@ -36,7 +36,7 @@ uv run indigorepublica-etsy-mcp --transport http     # or the systemd unit in de
 #   Request header: Authorization = Bearer <MCP_AUTH_TOKEN>
 ```
 
-## Tools (53)
+## Tools (54)
 
 Tools marked **write** change something on Etsy and are refused in `readonly` mode; **delete** tools are refused unless
 `ETSY_MCP_MODE=full`. Every other tool only reads (see [Safety model](#safety-model)).
@@ -55,7 +55,8 @@ Tools marked **write** change something on Etsy and are refused in `readonly` mo
 | `etsy_update_listing` | **write** Patch listing fields; `state=active` needs `confirm_publish_fee=true`. |
 | `etsy_publish_listing` | **write** Publish a draft (charges Etsy's listing fee; needs `confirm_publish_fee=true`). |
 | `etsy_delete_listing` | **delete** Permanently delete a listing. |
-| `etsy_create_digital_listing` | **write** One call: draft + images + files (+ optional publish) from a `listing.json` manifest. |
+| `etsy_create_digital_listing` | **write** One call: draft + images + files + optional video (+ optional publish) from a `listing.json` manifest. |
+| `etsy_upload_listing_video` | **write** Add a listing video (MP4/MOV, 5-15 s, up to 100 MB; Etsy removes the sound). |
 | `etsy_list_listing_images` / `etsy_upload_listing_image` / `etsy_delete_listing_image` | List photos; **write** upload one; **delete** remove one. |
 | `etsy_list_listing_files` / `etsy_upload_listing_file` / `etsy_delete_listing_file` | List download files; **write** attach one; **delete** remove one. |
 | `etsy_get_listing_inventory` / `etsy_update_listing_inventory` | Variations, SKUs, per-option prices (**write**: replace the inventory). |
@@ -269,5 +270,5 @@ uv sync --all-extras
 uv run --all-extras pytest -q
 ```
 
-No network, no real keys: Etsy is a mocked HTTP transport and the cache is a temp file. A test asserts the registered tool count (53)
-and that the "53 tools, 3 prompts, 5 resources" line at the top of this README matches the server, so adding a tool means updating both.
+No network, no real keys: Etsy is a mocked HTTP transport and the cache is a temp file. A test asserts the registered tool count (54)
+and that the "54 tools, 3 prompts, 5 resources" line at the top of this README matches the server, so adding a tool means updating both.

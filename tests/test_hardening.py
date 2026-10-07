@@ -319,6 +319,7 @@ ETSY_WRITES = {  # tool -> arguments: change something on Etsy without deleting 
     "etsy_publish_listing": {"listing_id": 1, "confirm_publish_fee": True},
     "etsy_upload_listing_image": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.png"},
     "etsy_upload_listing_file": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.pdf"},
+    "etsy_upload_listing_video": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.mp4"},
     "etsy_update_listing_inventory": {"listing_id": 1, "inventory": {"products": []}},
     "etsy_create_digital_listing": {"title": "Monthly Budget Planner Spreadsheet Template"},
     "etsy_add_tracking": {"receipt_id": 1, "tracking_code": "1Z999", "carrier_name": "ups"},
@@ -466,7 +467,7 @@ async def test_seo_apply_update_logs_every_refusal_once_and_a_success_once(env):
 
 
 # ----------------------------------------------------------------------------- the README's numbers stay true
-EXPECTED_TOOLS = 53
+EXPECTED_TOOLS = 54
 RESOURCE_URIS = ["etsy://shop/listings", "etsy://keywords/{seed}", "etsy://competitor/{shop}", "etsy://audit/{listing_id}", "etsy://writes/recent"]
 
 

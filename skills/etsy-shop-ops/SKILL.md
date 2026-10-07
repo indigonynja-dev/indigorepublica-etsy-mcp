@@ -53,6 +53,7 @@ Paths are relative to the manifest's folder. Find `taxonomy_id` with `etsy_searc
 5. `etsy_seo_check` -> fix errors.
 6. Show the user the full listing (title, price, tags, description, file list, image order). Wait for approval.
 7. `etsy_create_digital_listing` with `manifest_path`. Report the draft URL and any `errors` from the upload report.
+   Put `"video": "listing-video/<name>.mp4"` in the manifest to attach a 5-15 second listing video.
 8. Publish only on an explicit "publish": `etsy_publish_listing(listing_id, confirm_publish_fee=true)`.
 
 ## Workflow: weekly report

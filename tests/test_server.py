@@ -56,6 +56,9 @@ class FakeEtsy:
         if p.endswith("/images") and m == "POST":
             assert b'name="image"' in body
             return httpx.Response(201, json={"listing_image_id": 5000 + len(self.calls), "rank": 1, "url_fullxfull": "https://img"})
+        if p.endswith("/videos") and m == "POST":
+            assert b'name="video"' in body
+            return httpx.Response(201, json={"video_id": 7000 + len(self.calls), "video_state": "active", "video_url": "https://vid"})
         if p.endswith("/files") and m == "POST":
             assert b'name="file"' in body
             return httpx.Response(201, json={"listing_file_id": 6000 + len(self.calls), "filename": "x", "filesize": "1 KB"})
@@ -263,3 +266,34 @@ def test_migrate_legacy_data_dir(tmp_path):
     assert migrate_legacy_data_dir(tmp_path) is True
     assert (tmp_path / ".indigorepublica-etsy-mcp" / "tokens.json").exists() and not old.exists()
     assert migrate_legacy_data_dir(tmp_path) is False
+
+
+MP4 = b"\x00\x00\x00\x18ftypmp42" + b"0" * 32
+
+
+async def test_upload_listing_video(env):
+    s, fake, products = env
+    (products / "demo.mp4").write_bytes(MP4)
+    server = build_server(s, transport=httpx.MockTransport(fake))
+    r = await call(server, "etsy_upload_listing_video", {"listing_id": 901, "file_path": str(products / "demo.mp4")})
+    assert not r.is_error, r.content
+    assert r.structured_content["video_id"] and r.structured_content["state"] == "active"
+    post = next(c for c in fake.calls if c[1].endswith("/listings/901/videos"))
+    assert b'name="video"' in post[2] and b'name="name"' in post[2]
+    r = await call(server, "etsy_upload_listing_video", {"listing_id": 901, "file_base64": "aGk=", "filename": "notes.pdf"})
+    assert r.is_error and "doesn't look like a video" in r.content[0].text
+
+
+async def test_digital_listing_manifest_video_and_when_made(env):
+    s, fake, products = env
+    (products / "demo.mp4").write_bytes(MP4)
+    manifest = json.loads((products / "listing.json").read_text())
+    manifest["video"] = "demo.mp4"
+    (products / "listing-video.json").write_text(json.dumps(manifest))
+    server = build_server(s, transport=httpx.MockTransport(fake))
+    r = await call(server, "etsy_create_digital_listing", {"manifest_path": str(products / "listing-video.json")})
+    assert not r.is_error, r.content
+    out = r.structured_content
+    assert out["video"]["video_id"] and not out["errors"]
+    create = next(c for c in fake.calls if c[0] == "POST" and c[1].endswith("/listings"))
+    assert parse_qs(create[2].decode())["when_made"] == ["2020_2026"]

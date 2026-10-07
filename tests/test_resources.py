@@ -403,4 +403,4 @@ async def test_resources_are_not_exposed_as_tools(env):
     async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
         names = {t.name for t in (await c.list_tools()).tools}
     assert not any(n.startswith(("resource", "etsy_resource")) for n in names)
-    assert len(names) == 53, "adding resources must not change the tool count"
+    assert len(names) == 54, "adding resources must not change the tool count"
