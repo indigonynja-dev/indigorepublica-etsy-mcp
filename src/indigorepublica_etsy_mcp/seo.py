@@ -251,6 +251,11 @@ def score_digital(listing_type: str | None, file_count: int | None, digital_flag
 
 
 # --------------------------------------------------------------------------------------------- audit
+def category_has_attributes(taxonomy_properties: list[dict[str, Any]]) -> bool:
+    """True when a category offers at least one standard attribute (colour, occasion...), not just 'Custom Property' slots."""
+    return any((p.get("name") or "").strip().lower() != "custom property" for p in taxonomy_properties)
+
+
 def listing_kind(listing: dict[str, Any]) -> str | None:
     """Etsy's API calls the field listing_type ('download', 'physical', 'both'); older fixtures/code used 'type'."""
     return listing.get("listing_type") or listing.get("type")
@@ -543,6 +548,11 @@ def register(mcp: Any, *, research: ResearchDB, call: Callable[..., Awaitable[An
         # UNSURE endpoint: Etsy's getListingProperties path; failure just skips the attribute check.
         props = await best_effort(call("GET", f"/shops/{shop}/listings/{listing_id}/properties"))
         properties = [p for p in props.get("results") or [] if p.get("values")] if isinstance(props, dict) else None
+        if properties == [] and listing.get("taxonomy_id"):
+            # A category with only "Custom Property" slots has nothing to fill: skip the check rather than fail it.
+            offered = await best_effort(call("GET", f"/seller-taxonomy/nodes/{listing['taxonomy_id']}/properties"))
+            if isinstance(offered, dict) and not category_has_attributes(offered.get("results") or []):
+                properties = None
         cats: list[str] = []
         flat = await best_effort(taxonomy_flat())
         if flat and listing.get("taxonomy_id"):

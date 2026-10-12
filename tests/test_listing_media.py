@@ -193,3 +193,10 @@ def test_long_titles_flagged_by_word_count():
     s, issues = seo.score_title(" ".join(f"word{i}" for i in range(18)), None, [])
     assert any("18 words" in i["message"] for i in issues)
     assert seo.score_title("Botanical 2027 Digital Planner for GoodNotes", None, [])[0] == 100
+
+
+def test_category_without_standard_attributes_is_not_penalised():
+    assert not seo.category_has_attributes([{"property_id": 513, "name": "Custom Property"}, {"property_id": 514, "name": "Custom Property"}])
+    assert seo.category_has_attributes([{"property_id": 200, "name": "Primary color"}, {"property_id": 513, "name": "Custom Property"}])
+    r = seo.audit_listing(LISTING, file_count=1, properties=None)
+    assert r["sub_scores"]["attributes"]["score"] == 100
