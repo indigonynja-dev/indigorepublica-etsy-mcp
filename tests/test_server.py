@@ -114,7 +114,7 @@ async def test_tools_registered(env):
     for must in ["etsy_whoami", "etsy_create_digital_listing", "etsy_list_orders", "etsy_seo_check", "etsy_api_request"]:
         assert must in names
     deletes = [t.name for t in tools if t.annotations and t.annotations.destructive_hint]
-    assert set(deletes) == {"etsy_delete_listing", "etsy_delete_listing_image", "etsy_delete_listing_file"}
+    assert set(deletes) == {"etsy_delete_listing", "etsy_delete_listing_image", "etsy_delete_listing_file", "etsy_delete_listing_video"}
     assert {p.name for p in prompts} == {"publish_digital_product", "weekly_shop_report", "listing_seo_audit"}
 
 

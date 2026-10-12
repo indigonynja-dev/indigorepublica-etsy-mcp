@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (2026-10-12)
+
+### Fixed
+- `seo_audit` scored every download as a physical item: it read `type`, but Etsy's API returns `listing_type`. Digital-file checks now run.
+- Photo scoring capped at 10 and flagged anything above it; Etsy allows 20. Full marks now from 10 photos up to 20.
+- Dropped the "No styles set" penalty (Etsy retired listing styles; the API ignores them).
+- Main keyword matching ignores word order, as Etsy search does ("planner digital 2027" matches "2027 Digital Planner").
+- HTML entities from Etsy (`&#39;`, `&quot;`) are unescaped before scoring.
+- Title rule follows Etsy's current guidance: flag titles over 15 words instead of short-but-fine titles under 70 chars.
+
+### Added
+- `etsy_update_listing_image`: change a photo's rank and/or alt text without re-uploading; keeps the fields you leave out (Etsy wipes alt text otherwise).
+- `etsy_get_listing_properties` / `etsy_set_listing_property`: category attributes (colour, occasion, holiday), value ids looked up automatically.
+- `etsy_list_listing_videos` / `etsy_delete_listing_video` (delete needs `ETSY_MCP_MODE=full`).
+- `etsy_create_digital_listing` manifests: per-image alt text (`{"path", "alt"}` or `image_alts`), `properties`, and up-front 20-photo / 5-file checks.
+
 ## Unreleased
 - Listing videos: new `etsy_upload_listing_video` (Etsy's uploadListingVideo) from a file in ETSY_UPLOAD_DIRS, an https URL or
   base64, up to 100 MB. `etsy_create_digital_listing` takes `video_path`/`video_url` and a `video` manifest key.

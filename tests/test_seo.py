@@ -17,7 +17,7 @@ from indigorepublica_etsy_mcp.server import build_server
 from .test_server import SHOP, FakeEtsy, call, env  # noqa: F401  (env fixture)
 
 GOOD = {
-    "listing_id": 10, "type": "download", "taxonomy_id": 111,
+    "listing_id": 10, "listing_type": "download", "taxonomy_id": 111,
     "title": "Monthly Budget Planner Spreadsheet Template for Google Sheets, Excel Finance Tracker Printable",
     "tags": ["budget planner", "monthly budget", "finance tracker", "google sheets", "excel template", "debt payoff",
              "savings tracker", "budget spreadsheet", "money planner", "expense tracker", "bill organizer", "paycheck budget", "digital download"],
@@ -25,7 +25,7 @@ GOOD = {
     "materials": ["Google Sheets"], "styles": ["minimalist"], "images": [{}] * 10,
 }
 BAD = {
-    "listing_id": 11, "type": "download", "taxonomy_id": 111,
+    "listing_id": 11, "listing_type": "download", "taxonomy_id": 111,
     "title": "PLANNER PLANNER PLANNER BUDGET",
     "tags": ["planner", "Planner", "planners", "budget"], "description": "Nice planner.", "materials": [], "images": [{}] * 2,
 }
@@ -70,7 +70,7 @@ def test_description_rules():
 
 
 def test_physical_listing_drops_digital_weight():
-    r = seo.audit_listing({**GOOD, "type": "physical"}, properties=None)
+    r = seo.audit_listing({**GOOD, "listing_type": "physical"}, properties=None)
     assert "digital" not in r["sub_scores"] and any("renormalised" in n for n in r["notes"])
 
 

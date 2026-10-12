@@ -47,6 +47,8 @@ LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
 # starts rejecting it, update it here (the API error lists the valid values).
 WHEN_MADE_DIGITAL = "2020_2026"
 VIDEO_MAX_MB = 100  # Etsy's listing-video limit
+IMAGES_MAX = 20  # Etsy allows 20 photos per listing
+FILES_MAX = 5  # Etsy allows 5 digital files per listing
 
 UPDATABLE_LISTING_FIELDS = {
     "title", "description", "price", "quantity", "tags", "materials", "taxonomy_id", "shop_section_id",
@@ -538,6 +540,29 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/images/{listing_image_id}")
             return w.response
 
+    @mcp.tool(annotations=WRITE)
+    async def etsy_update_listing_image(listing_id: int, listing_image_id: int, rank: int | None = None,
+                                        alt_text: str | None = None) -> dict[str, Any]:
+        """Change an existing photo's rank (1 = primary) and/or alt text without re-uploading it.
+        Whatever you leave out is kept: Etsy wipes alt text when it is omitted, so the current value is re-sent."""
+        req = {"listing_id": listing_id, "listing_image_id": listing_image_id, "rank": rank, "alt_text": alt_text}
+        async with wlog("etsy_update_listing_image", listing_id, req) as w:
+            guard("write")
+            if rank is not None and not 1 <= rank <= IMAGES_MAX:
+                raise ToolError(f"rank must be 1-{IMAGES_MAX}.")
+            if alt_text is not None and len(alt_text) > 500:
+                raise ToolError(f"alt_text is {len(alt_text)} chars; Etsy allows 500.")
+            imgs = (await call("GET", f"/listings/{listing_id}/images")).get("results", [])
+            cur = next((i for i in imgs if i.get("listing_image_id") == listing_image_id), None)
+            if cur is None:
+                raise ToolError(f"Image {listing_image_id} is not on listing {listing_id}.")
+            w.before = {"rank": cur.get("rank"), "alt_text": cur.get("alt_text")}
+            form = {"listing_image_id": listing_image_id, "rank": rank if rank is not None else cur.get("rank"),
+                    "alt_text": alt_text if alt_text is not None else (cur.get("alt_text") or None)}
+            res = await call("POST", f"/shops/{await sid()}/listings/{listing_id}/images", form=form)
+            w.response = out = {"listing_image_id": res.get("listing_image_id"), "rank": res.get("rank"), "alt_text": res.get("alt_text")}
+            return out
+
     # ---- video
     @mcp.tool(annotations=WRITE)
     async def etsy_upload_listing_video(
@@ -561,6 +586,22 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
                              form={"name": name or fname}, files={"video": (fname, data, mime)})
             w.response = out = {"video_id": res.get("video_id"), "state": res.get("video_state"), "url": res.get("video_url")}
             return out
+
+    @mcp.tool(annotations=RO)
+    async def etsy_list_listing_videos(listing_id: int) -> dict[str, Any]:
+        """A listing's videos. Uploading a new video makes it the active one; older ones stay as 'inactive'."""
+        data = await call("GET", f"/listings/{listing_id}/videos")
+        return {"videos": [{"video_id": v.get("video_id"), "state": v.get("video_state"), "width": v.get("width"),
+                            "height": v.get("height"), "url": v.get("video_url")} for v in data.get("results", [])]}
+
+    @mcp.tool(annotations=DELETE)
+    async def etsy_delete_listing_video(listing_id: int, video_id: int) -> dict[str, Any]:
+        """Remove a video from a listing. Blocked unless ETSY_MCP_MODE=full."""
+        req = {"listing_id": listing_id, "video_id": video_id}
+        async with wlog("etsy_delete_listing_video", listing_id, req) as w:
+            guard("delete")
+            w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/videos/{video_id}")
+            return w.response
 
     # ---- digital files
     @mcp.tool(annotations=RO)
@@ -600,6 +641,48 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             guard("delete")
             w.response = await call("DELETE", f"/shops/{await sid()}/listings/{listing_id}/files/{listing_file_id}")
             return w.response
+
+    # ---- attributes (listing properties: colour, occasion, holiday...)
+    @mcp.tool(annotations=RO)
+    async def etsy_get_listing_properties(listing_id: int) -> dict[str, Any]:
+        """The category attributes set on a listing (colour, occasion, holiday...). They act like tags and power search filters."""
+        data = await call("GET", f"/shops/{await sid()}/listings/{listing_id}/properties")
+        return {"properties": [{"property_id": r.get("property_id"), "name": r.get("property_name"), "values": r.get("values"),
+                                "value_ids": r.get("value_ids"), "scale_id": r.get("scale_id")} for r in data.get("results", [])]}
+
+    async def _resolve_property(listing_id: int, property_id: int, values: list[str], value_ids: list[int] | None) -> list[int]:
+        if value_ids:
+            return [int(v) for v in value_ids]
+        listing = await call("GET", f"/listings/{listing_id}")
+        tax = listing.get("taxonomy_id")
+        props = (await call("GET", f"/seller-taxonomy/nodes/{tax}/properties")).get("results", [])
+        prop = next((x for x in props if x.get("property_id") == property_id), None)
+        if prop is None:
+            raise ToolError(f"Category {tax} has no property {property_id}. See etsy_get_taxonomy_properties({tax}).")
+        names = {str(v.get("name", "")).lower(): v.get("value_id") for v in prop.get("possible_values") or []}
+        if not names:  # free-text property: Etsy takes values with no ids
+            return []
+        missing = [v for v in values if v.lower() not in names]
+        if missing:
+            raise ToolError(f"{missing} not allowed for {prop.get('name')}; choose from {sorted(n for n in names)[:40]}.")
+        return [int(names[v.lower()]) for v in values]
+
+    @mcp.tool(annotations=WRITE)
+    async def etsy_set_listing_property(listing_id: int, property_id: int, values: list[str], value_ids: list[int] | None = None,
+                                        scale_id: int | None = None) -> dict[str, Any]:
+        """Set one category attribute (e.g. Primary color = ['White']). value_ids are looked up from the listing's category when
+        omitted. Find property ids with etsy_get_taxonomy_properties."""
+        req = {"listing_id": listing_id, "property_id": property_id, "values": values, "value_ids": value_ids, "scale_id": scale_id}
+        async with wlog("etsy_set_listing_property", listing_id, req) as w:
+            guard("write")
+            if not values:
+                raise ToolError("Pass at least one value.")
+            ids = await _resolve_property(listing_id, property_id, values, value_ids)
+            form = {"values": values, "value_ids": ids or None, "scale_id": scale_id}
+            res = await call("PUT", f"/shops/{await sid()}/listings/{listing_id}/properties/{property_id}", form=form)
+            w.response = out = {"property_id": res.get("property_id"), "name": res.get("property_name"), "values": res.get("values"),
+                                "value_ids": res.get("value_ids")}
+            return out
 
     # ---- inventory
     @mcp.tool(annotations=RO)
@@ -642,6 +725,9 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         """One call: create a digital-download draft, upload images in order (first = primary), attach the files and an optional
         video (video_path/video_url, or "video" in the manifest), optionally publish.
         Easiest with manifest_path -> a listing.json inside ETSY_UPLOAD_DIRS (paths in it resolve relative to its folder). Explicit args override the manifest.
+        Manifest extras: "images" entries may be {"path": ..., "alt": ...} for alt text (or give "image_alts" in the same order);
+        "properties": [{"property_id": 200, "values": ["White"]}] sets category attributes; "video" is a path.
+        Etsy limits: 20 photos, 5 files.
         Leaves the listing as a draft unless publish=true AND confirm_publish_fee=true. Partial failures are reported, not hidden."""
         # The sub-calls below each write their own log entries; this one is the summary.
         async with wlog("etsy_create_digital_listing", None, {"manifest_path": manifest_path, "title": title, "publish": publish}) as w:
@@ -677,7 +763,12 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         missing = [k for k, v in (("title", title_), ("description", desc_), ("price", price_), ("taxonomy_id", tax_)) if v in (None, "")]
         if missing:
             raise ToolError(f"Missing {missing} (pass them or put them in the manifest).")
-        imgs = rel(image_paths if image_paths is not None else m.get("images"))
+        raw_imgs = image_paths if image_paths is not None else (m.get("images") or [])
+        alts = [i.get("alt") if isinstance(i, dict) else None for i in raw_imgs]
+        for i, a in enumerate(m.get("image_alts") or []):
+            if i < len(alts) and not alts[i]:
+                alts[i] = a
+        imgs = rel([i["path"] if isinstance(i, dict) else i for i in raw_imgs])
         files = rel(file_paths if file_paths is not None else m.get("files"))
         img_urls = image_urls if image_urls is not None else m.get("image_urls", [])
         f_urls = file_urls if file_urls is not None else m.get("file_urls", [])
@@ -690,6 +781,10 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
             raise ToolError("At least one image is required (Etsy won't publish without one).")
         if not (files or f_urls):
             raise ToolError("At least one downloadable file is required for a digital listing.")
+        if len(imgs) + len(img_urls or []) > IMAGES_MAX:
+            raise ToolError(f"{len(imgs) + len(img_urls or [])} photos; Etsy allows {IMAGES_MAX}.")
+        if len(files) + len(f_urls or []) > FILES_MAX:
+            raise ToolError(f"{len(files) + len(f_urls or [])} files; Etsy allows {FILES_MAX} per listing (zip extras together).")
 
         created = await etsy_create_draft_listing(
             title=title_, description=desc_, price=float(price_), taxonomy_id=int(tax_),
@@ -701,9 +796,9 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
         report: dict[str, Any] = {"listing_id": lid, "url": created["listing"].get("url"), "state": "draft",
                                   "seo_warnings": created["seo_warnings"], "images": [], "files": [], "video": None, "errors": []}
         rank = 1
-        for p in imgs:
+        for p, alt in zip(imgs, alts):
             try:
-                report["images"].append(await etsy_upload_listing_image(lid, file_path=p, rank=rank)); rank += 1
+                report["images"].append(await etsy_upload_listing_image(lid, file_path=p, rank=rank, alt_text=alt)); rank += 1
             except ToolError as e:
                 report["errors"].append(f"image {p}: {e}")
         for u in img_urls:
@@ -726,6 +821,12 @@ def build_server(settings: Settings, transport: httpx.AsyncBaseTransport | None 
                 report["video"] = await (etsy_upload_listing_video(lid, file_path=vid) if vid else etsy_upload_listing_video(lid, file_url=vid_url))
             except ToolError as e:
                 report["errors"].append(f"video {vid or vid_url}: {e}")
+        for prop in m.get("properties") or []:
+            try:
+                report.setdefault("properties", []).append(await etsy_set_listing_property(
+                    lid, int(prop["property_id"]), list(prop["values"]), prop.get("value_ids"), prop.get("scale_id")))
+            except (ToolError, KeyError, TypeError, ValueError) as e:
+                report["errors"].append(f"property {prop}: {e}")
         if publish:
             if report["errors"]:
                 report["publish"] = "skipped: fix upload errors first"

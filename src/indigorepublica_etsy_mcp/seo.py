@@ -9,6 +9,7 @@ Data sources: Etsy Open API v3 (the user's own listings) and the local research 
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import secrets
@@ -25,7 +26,9 @@ from .research import ResearchDB, age_days, norm_keyword, now_iso
 # Sub-score weights (must sum to 100). "digital" is dropped and the rest renormalised for physical listings.
 WEIGHTS: dict[str, int] = {"title": 25, "tags": 25, "description": 15, "attributes": 10, "images": 15, "digital": 10}
 
-TITLE_MAX, TAGS_MAX, TAG_CHARS_MAX, IMAGES_MAX = 140, 13, 20, 10
+TITLE_MAX, TAGS_MAX, TAG_CHARS_MAX = 140, 13, 20
+IMAGES_TARGET, IMAGES_MAX = 10, 20  # full marks from 10 photos; Etsy allows up to 20
+TITLE_WORDS_MAX = 15  # Etsy's Seller Handbook recommends titles under 15 words
 KEYWORD_PREVIEW_CHARS = 160
 PREVIEW_TTL_HOURS = 24
 PREVIEW_FIELDS = ("title", "tags", "description")
@@ -61,12 +64,33 @@ def _find_phrase(tokens: list[str], phrase: list[str]) -> int | None:
     return None
 
 
+def _find_words(tokens: list[str], phrase: list[str]) -> int | None:
+    """Like _find_phrase, but the phrase's words may appear in any order inside a window of the same length.
+    Etsy matches the words of a search regardless of order ("planner digital 2027" ~ "2027 Digital Planner")."""
+    pos = _find_phrase(tokens, phrase)
+    if pos is not None:
+        return pos
+    n, want = len(phrase), sorted(phrase)
+    if not n:
+        return None
+    for i in range(len(tokens) - n + 1):
+        if sorted(tokens[i:i + n]) == want:
+            return i
+    return None
+
+
 def infer_keyword(title: str, tags: list[str]) -> str | None:
-    """Best guess at the listing's main keyword: the longest tag that appears in the title, else the first tag."""
+    """Best guess at the listing's main keyword: the longest tag whose words appear together in the title (any order),
+    ties going to the earlier tag; else the tag sharing the most words with the title's opening; else the first tag."""
     toks = _tokens(title)
-    hits = [t for t in tags if _find_phrase(toks, _tokens(t)) is not None]
+    hits = [t for t in tags if _find_words(toks, _tokens(t)) is not None]
     if hits:
         return max(hits, key=lambda t: (len(_tokens(t)), -tags.index(t)))
+    head = set(toks[:6])
+    overlap = [(len(set(_tokens(t)) & head), -i, t) for i, t in enumerate(tags)]
+    best = max(overlap, default=None)
+    if best and best[0] >= 2:
+        return best[2]
     return tags[0] if tags else None
 
 
@@ -92,13 +116,14 @@ def score_title(title: str, keyword: str | None, lint_errors: list[str]) -> tupl
     if n > TITLE_MAX:
         issues.append(_issue(40, f"Title is {n} chars; Etsy max is {TITLE_MAX}."))
     elif n < 40:
-        issues.append(_issue(25, f"Title is only {n} chars; use more of the {TITLE_MAX} available with buyer search phrases."))
-    elif n < 70:
-        issues.append(_issue(10, f"Title is {n} chars; there is room for more search phrases (max {TITLE_MAX})."))
+        issues.append(_issue(25, f"Title is only {n} chars; lead with the exact phrase buyers search and add a second phrase."))
+    words = len(title.split())
+    if words > TITLE_WORDS_MAX:
+        issues.append(_issue(10, f"Title is {words} words; Etsy recommends under {TITLE_WORDS_MAX} (long titles are cut off on mobile)."))
 
     toks = _tokens(title)
     if keyword:
-        pos = _find_phrase(toks, _tokens(keyword))
+        pos = _find_words(toks, _tokens(keyword))
         if pos is None:
             issues.append(_issue(30, f"Main keyword '{keyword}' is not in the title."))
         else:
@@ -179,7 +204,7 @@ def score_description(description: str, keyword: str | None) -> tuple[float, lis
         issues.append(_issue(20, f"Description is {len(desc)} chars; add what's included, sizes/formats and how to use it."))
     if keyword:
         head = _tokens(desc[:KEYWORD_PREVIEW_CHARS])
-        if _find_phrase(head, _tokens(keyword)) is None:
+        if _find_words(head, _tokens(keyword)) is None:
             issues.append(_issue(35, f"Main keyword '{keyword}' is not in the first {KEYWORD_PREVIEW_CHARS} characters (the search-result snippet)."))
     lines = [ln for ln in desc.splitlines() if ln.strip()]
     structured = sum(1 for ln in lines if _BULLET_RE.match(ln) or (len(ln.strip()) <= 60 and (ln.strip().endswith(":") or (ln.strip().isupper() and len(ln.strip()) > 3))))
@@ -190,11 +215,11 @@ def score_description(description: str, keyword: str | None) -> tuple[float, lis
     return _clamp(100 - sum(i["points"] for i in issues)), issues
 
 
-def score_attributes(materials: list[str], properties: list[Any] | None, styles: list[str]) -> tuple[float, list[Issue]]:
-    """properties is None when attribute data could not be fetched (that check is then skipped, not failed)."""
+def score_attributes(materials: list[str], properties: list[Any] | None, styles: list[str] | None = None) -> tuple[float, list[Issue]]:
+    """properties is None when attribute data could not be fetched (that check is then skipped, not failed).
+    styles is accepted for backwards compatibility but no longer scored: Etsy retired listing styles."""
     issues: list[Issue] = []
-    checks = [(bool(materials), "No materials set; add them (e.g. 'PDF', 'Google Sheets')."),
-              (bool(styles), "No styles set; add up to two to help category browsing.")]
+    checks = [(bool(materials), "No materials set; add them (e.g. 'PDF', 'Google Sheets').")]
     if properties is not None:
         checks.append((bool(properties), "No category attributes filled (colour, occasion, etc.); attributes feed Etsy's search filters."))
     each = 100 / len(checks)
@@ -205,16 +230,18 @@ def score_attributes(materials: list[str], properties: list[Any] | None, styles:
 
 
 def score_images(count: int) -> tuple[float, list[Issue]]:
+    """Full marks from IMAGES_TARGET photos up to Etsy's IMAGES_MAX (20)."""
     if count > IMAGES_MAX:
         return 90.0, [_issue(10, f"{count} images; Etsy allows at most {IMAGES_MAX}.")]
-    if count < IMAGES_MAX:
-        return _clamp(count * 100 / IMAGES_MAX), [_issue(round(100 - count * 100 / IMAGES_MAX, 1), f"{count}/{IMAGES_MAX} images; use all {IMAGES_MAX} slots (mockups, what's included, sizes).")]
+    if count < IMAGES_TARGET:
+        lost = round(100 - count * 100 / IMAGES_TARGET, 1)
+        return _clamp(count * 100 / IMAGES_TARGET), [_issue(lost, f"{count} images; aim for at least {IMAGES_TARGET} (Etsy allows {IMAGES_MAX}): mockups, what's included, sizes, how it works.")]
     return 100.0, []
 
 
 def score_digital(listing_type: str | None, file_count: int | None, digital_flag: bool | None = None) -> tuple[float, list[Issue]]:
     issues: list[Issue] = []
-    if listing_type != "download" and digital_flag is not True:
+    if listing_type not in ("download", "both") and digital_flag is not True:
         issues.append(_issue(50, f"Listing type is '{listing_type}', not 'download'."))
     if file_count is None:
         pass  # couldn't fetch files; don't fail the check
@@ -224,18 +251,24 @@ def score_digital(listing_type: str | None, file_count: int | None, digital_flag
 
 
 # --------------------------------------------------------------------------------------------- audit
+def listing_kind(listing: dict[str, Any]) -> str | None:
+    """Etsy's API calls the field listing_type ('download', 'physical', 'both'); older fixtures/code used 'type'."""
+    return listing.get("listing_type") or listing.get("type")
+
+
 def audit_listing(listing: dict[str, Any], *, image_count: int | None = None, file_count: int | None = None,
                   properties: list[Any] | None = None, category_names: list[str] | None = None,
                   keyword: str | None = None, lint: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
     """Score one listing 0-100 from its Etsy record plus extras. Pure: no I/O."""
     if lint is None:
         from .server import seo_check as lint  # lazy: server imports this module
-    title, tags = listing.get("title") or "", [str(t) for t in listing.get("tags") or []]
-    description, materials = listing.get("description") or "", listing.get("materials") or []
-    styles = listing.get("styles") or []
+    # Etsy returns HTML-escaped text (&#39; &quot; &amp;); score what shoppers actually see.
+    title, tags = html.unescape(listing.get("title") or ""), [html.unescape(str(t)) for t in listing.get("tags") or []]
+    description, materials = html.unescape(listing.get("description") or ""), listing.get("materials") or []
     if image_count is None:
         image_count = len(listing.get("images") or [])
-    is_download = listing.get("type") == "download" or listing.get("is_digital") is True
+    ltype = listing_kind(listing)
+    is_download = ltype in ("download", "both") or listing.get("is_digital") is True
     kw = norm_keyword(keyword) or infer_keyword(title, tags)
     lint_res = lint(title, tags, description, materials)
 
@@ -243,11 +276,11 @@ def audit_listing(listing: dict[str, Any], *, image_count: int | None = None, fi
         "title": score_title(title, kw, lint_res["errors"]),
         "tags": score_tags(tags, category_names or [], lint_res["errors"]),
         "description": score_description(description, kw),
-        "attributes": score_attributes(materials, properties, styles),
+        "attributes": score_attributes(materials, properties),
         "images": score_images(image_count),
     }
     if is_download:
-        parts["digital"] = score_digital(listing.get("type"), file_count, listing.get("is_digital"))
+        parts["digital"] = score_digital(ltype, file_count, listing.get("is_digital"))
     total_w = sum(WEIGHTS[k] for k in parts)
     score = round(sum(parts[k][0] * WEIGHTS[k] for k in parts) / total_w, 1)
 
@@ -504,7 +537,7 @@ def register(mcp: Any, *, research: ResearchDB, call: Callable[..., Awaitable[An
         listing = await call("GET", f"/listings/{listing_id}", params={"includes": ["Images"]})
         shop = await sid()
         files = None
-        if listing.get("type") == "download" or listing.get("is_digital"):
+        if listing_kind(listing) in ("download", "both") or listing.get("is_digital"):
             data = await best_effort(call("GET", f"/shops/{shop}/listings/{listing_id}/files"))
             files = len(data.get("results") or []) if isinstance(data, dict) else None
         # UNSURE endpoint: Etsy's getListingProperties path; failure just skips the attribute check.

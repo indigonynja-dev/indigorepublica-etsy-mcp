@@ -309,6 +309,7 @@ DELETES = {  # id -> (tool, arguments): permanently remove something on Etsy. Re
     "etsy_delete_listing": ("etsy_delete_listing", {"listing_id": 1}),
     "etsy_delete_listing_image": ("etsy_delete_listing_image", {"listing_id": 1, "listing_image_id": 2}),
     "etsy_delete_listing_file": ("etsy_delete_listing_file", {"listing_id": 1, "listing_file_id": 3}),
+    "etsy_delete_listing_video": ("etsy_delete_listing_video", {"listing_id": 1, "video_id": 4}),
     "etsy_api_request[DELETE]": ("etsy_api_request", {"method": "DELETE", "path": "/listings/1"}),
 }
 ETSY_WRITES = {  # tool -> arguments: change something on Etsy without deleting it. Refused in readonly, allowed in safe.
@@ -320,6 +321,8 @@ ETSY_WRITES = {  # tool -> arguments: change something on Etsy without deleting 
     "etsy_upload_listing_image": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.png"},
     "etsy_upload_listing_file": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.pdf"},
     "etsy_upload_listing_video": {"listing_id": 1, "file_base64": "aGk=", "filename": "a.mp4"},
+    "etsy_update_listing_image": {"listing_id": 1, "listing_image_id": 2, "alt_text": "Cover"},
+    "etsy_set_listing_property": {"listing_id": 1, "property_id": 200, "values": ["White"], "value_ids": [10]},
     "etsy_update_listing_inventory": {"listing_id": 1, "inventory": {"products": []}},
     "etsy_create_digital_listing": {"title": "Monthly Budget Planner Spreadsheet Template"},
     "etsy_add_tracking": {"receipt_id": 1, "tracking_code": "1Z999", "carrier_name": "ups"},
@@ -343,7 +346,7 @@ async def test_every_write_tool_is_classified(env):
     assert writers == classified, f"write tools missing from the table: {sorted(writers - classified)}; stale entries: {sorted(classified - writers)}"
     assert not set(ETSY_WRITES) & LOCAL_WRITES
     destructive = {t.name for t in tools if t.annotations and t.annotations.destructive_hint}
-    assert destructive == {"etsy_delete_listing", "etsy_delete_listing_image", "etsy_delete_listing_file"}
+    assert destructive == {"etsy_delete_listing", "etsy_delete_listing_image", "etsy_delete_listing_file", "etsy_delete_listing_video"}
 
 
 @pytest.mark.parametrize("name, args", DELETE_CASES)
@@ -467,11 +470,11 @@ async def test_seo_apply_update_logs_every_refusal_once_and_a_success_once(env):
 
 
 # ----------------------------------------------------------------------------- the README's numbers stay true
-EXPECTED_TOOLS = 54
+EXPECTED_TOOLS = 59
 RESOURCE_URIS = ["etsy://shop/listings", "etsy://keywords/{seed}", "etsy://competitor/{shop}", "etsy://audit/{listing_id}", "etsy://writes/recent"]
 
 
-async def test_tool_count_is_53_and_matches_the_readme(env):
+async def test_tool_count_matches_the_readme(env):
     s, fake, _ = env
     async with Client(build_server(s, transport=httpx.MockTransport(fake))) as c:
         tools = (await c.list_tools()).tools
